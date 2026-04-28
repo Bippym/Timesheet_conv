@@ -4,15 +4,13 @@ from datetime import datetime, timedelta
 from weasyprint import HTML
 import pdfplumber
 import re
-import io
 
 st.set_page_config(page_title="Network Timesheet Generator", layout="wide")
 
 st.title("Network (Catering Engineers) Ltd - Timesheet Converter")
 st.markdown("Upload your work-style PDF. The app will extract the data, apply your continuity rules, and generate the manual-style PDF.")
 
-# --- DEBUG TOGGLE ---
-debug_mode = st.checkbox("Debug Mode: Show Raw PDF Text (Use if extraction fails)")
+debug_mode = st.checkbox("Debug Mode: Show Raw PDF Text")
 
 def calc_hours(start_str, end_str):
     if not start_str or not end_str or pd.isna(start_str) or pd.isna(end_str): return 0.0
@@ -48,29 +46,42 @@ if uploaded_file is not None:
                     match = re.search(r"Week:\s*(\d+)", text)
                     if match: week_number = match.group(1)
 
-                # --- NEW TEXT SCRAPER LOGIC ---
+                # --- REFINED TEXT SCRAPER ---
                 for line in text.split('\n'):
-                    if "Wrkd:" in line or "Day:" in line or "Prod:" in line or "Site Miles" in line or "Hours" in line or "Batch" in line:
-                        continue
-                        
-                    # Hunt for all times formatted as HH:MM
+                    # Find all times formatted as HH:MM
                     times = re.findall(r'\b\d{1,2}:\d{2}\b', line)
                     
+                    # If a line has times, it's a valid job
                     if len(times) >= 2: 
                         first_time_idx = line.find(times[0])
                         raw_site = line[:first_time_idx].strip()
                         
+                        # Extract the Date Number (e.g., from "M 20 " or "20 ")
+                        date_match = re.search(r"^([A-Z]\s*)?(\d{1,2})\s+", raw_site)
+                        date_num = date_match.group(2) if date_match else ""
+                        
                         # Clean up the site string
-                        site_clean = raw_site.split("**QUOTE")[0].strip() # Remove the garbled quote data
-                        site_clean = re.sub(r"^[A-Z]\s*\d{1,2}\s*", "", site_clean) # Remove the Day/Date prefix (e.g., M 20)
-                        site_clean = re.sub(r"\s+\d+$", "", site_clean).strip() # Remove the miles digit just before the time
+                        site_clean = raw_site.split("**QUO")[0].strip() # Remove **QUOTE garbage
+                        site_clean = re.sub(r"^([A-Z]\s*)?\d{1,2}\s+", "", site_clean) # Remove the M 20 prefix
+                        site_clean = re.sub(r"\s+\d+$", "", site_clean).strip() # Remove the miles digits before the time
+                        
+                        # Smart Time Assignment
+                        if len(times) >= 3:
+                            began, arrived, left = times[0], times[1], times[2]
+                        else:
+                            # If only 2 times, it depends if it's the journey Home or a corrupted mid-day job
+                            if "HOME" in site_clean.upper():
+                                began, arrived, left = times[0], times[1], ""
+                            else:
+                                began, arrived, left = "", times[0], times[1] # Began is blank, will be filled by Logic Engine
                         
                         extracted_data.append({
+                            "Date Num": date_num,
                             "Original Row Info": line,
                             "Site & Ref No.": site_clean,
-                            "Began Journey": times[0],
-                            "Arrived On Site": times[1],
-                            "Left Site": times[2] if len(times) > 2 else ""
+                            "Began Journey": began,
+                            "Arrived On Site": arrived,
+                            "Left Site": left
                         })
 
     if debug_mode:
@@ -78,29 +89,35 @@ if uploaded_file is not None:
         st.text_area("Raw Extracted Text", raw_text_dump, height=300)
 
     if extracted_data:
-        st.success("Data extracted successfully! Please review and fix any missing days below.")
+        st.success("Data extracted! The table below now uses 'Date Number' to group your days.")
         col1, col2 = st.columns(2)
         with col1: final_date = st.text_input("Week End Date", value=week_ending_str)
         with col2: final_week = st.text_input("Week Number", value=week_number)
             
         df = pd.DataFrame(extracted_data)
+        # Reorder columns for the editor
+        df = df[["Date Num", "Site & Ref No.", "Began Journey", "Arrived On Site", "Left Site", "Original Row Info"]]
         edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
         
         if st.button("Apply Rules & Generate PDF", type="primary"):
             processed_data = []
             has_weekend = False
-            for site_str in df["Original Row Info"].astype(str):
-                if re.match(r"^[S]\s*\d{1,2}", site_str): has_weekend = True # Check if line starts with S (Saturday/Sunday)
+            
+            # Check for weekend On-Call trigger (Saturday/Sunday dates usually start with S)
+            for raw_info in df["Original Row Info"].astype(str):
+                if re.match(r"^[S]\s*\d{1,2}", raw_info): has_weekend = True
                     
             on_call_status = "Yes" if has_weekend else "No"
             
             for index, row in edited_df.iterrows():
-                site, arrived, left, began, raw_info = str(row["Site & Ref No."]), str(row["Arrived On Site"]), str(row["Left Site"]), str(row["Began Journey"]), str(row["Original Row Info"])
+                date_num, site, arrived, left, began = str(row["Date Num"]), str(row["Site & Ref No."]), str(row["Arrived On Site"]), str(row["Left Site"]), str(row["Began Journey"])
                 
-                if began == "" and index > 0: began = processed_data[-1]["left"]
+                # THE GOLD STANDARD CONTINUITY RULE
+                if began == "" and index > 0: 
+                    began = processed_data[-1]["left"]
+                    
                 travel_time, work_time = calc_hours(began, arrived), calc_hours(arrived, left)
-                
-                processed_data.append({"raw_info": raw_info, "site": site, "began": began, "arrived": arrived, "left": left, "work": work_time, "travel": travel_time})
+                processed_data.append({"date": date_num, "site": site, "began": began, "arrived": arrived, "left": left, "work": work_time, "travel": travel_time})
                 
             html_content = f"""
             <!DOCTYPE html>
@@ -130,17 +147,17 @@ if uploaded_file is not None:
                     <tbody>
             """
             
+            # Group by Date Number to generate day headers
+            df_processed = pd.DataFrame(processed_data)
             grand_total = 0
-            for row in processed_data:
-                if re.match(r"^[A-Z]\s*\d{1,2}", str(row['raw_info'])):
-                     day_letter = str(row['raw_info'])[0]
-                     day_map = {"M": "MONDAY", "T": "TUESDAY", "W": "WEDNESDAY", "F": "FRIDAY", "S": "SAT/SUN"}
-                     day_display = day_map.get(day_letter, day_letter)
-                     html_content += f'<tr><td colspan="10" class="day-row">{day_display}</td></tr>'
-                     
-                day_total = row['work'] + row['travel']
+            
+            for date, group in df_processed.groupby("date", sort=False):
+                html_content += f'<tr><td colspan="10" class="day-row">Date: {date}</td></tr>'
+                day_total = 0
+                for _, row in group.iterrows():
+                    html_content += f"<tr><td>{row['site']}</td><td></td><td></td><td>{row['began']}</td><td>{row['arrived']}</td><td>{row['left']}</td><td>{row['work']:.2f}</td><td></td><td>{row['travel']:.2f}</td><td></td></tr>"
+                    day_total += row['work'] + row['travel']
                 grand_total += day_total
-                html_content += f"<tr><td>{row['site']}</td><td></td><td></td><td>{row['began']}</td><td>{row['arrived']}</td><td>{row['left']}</td><td>{row['work']:.2f}</td><td></td><td>{row['travel']:.2f}</td><td></td></tr>"
             
             html_content += f"</tbody></table><div style='margin-top: 20px; font-weight: bold; text-align: right; border-top: 1px solid #000; padding-top: 5px;'>Weekly Total Hours: {grand_total:.2f}</div></body></html>"
             
