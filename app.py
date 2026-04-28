@@ -15,6 +15,7 @@ st.set_page_config(page_title="Network Timesheet Dashboard", layout="wide")
 if "saved_contract" not in st.session_state: st.session_state.saved_contract = 40
 if "saved_rate" not in st.session_state: st.session_state.saved_rate = 0.00
 if "saved_engineer" not in st.session_state: st.session_state.saved_engineer = "UNKNOWN ENGINEER"
+if "saved_service_5yr" not in st.session_state: st.session_state.saved_service_5yr = False
 if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0 
 if "last_uploaded_db" not in st.session_state: st.session_state.last_uploaded_db = None
 
@@ -104,7 +105,19 @@ def process_timesheet_data(df, end_date_obj=None, missing_weekdays=None, missing
                 pending_break_mins = 0 
                 
             prod_cat = "Ignored" if ("HOME" in site.upper() or "BREAK" in site.upper() or work_time == 0) else get_productivity_category(site)
-            processed_data.append({"date": date_num, "site": site, "began": began, "arrived": arrived, "left": left, "work": work_time, "travel": travel_time, "rest_break": rest_break_display, "productivity": prod_cat})
+            
+            # Embed full YYYY-MM-DD for precise leave tracking
+            full_date_str = ""
+            if end_date_obj and date_num:
+                try:
+                    for i in range(7):
+                        curr = end_date_obj - timedelta(days=6-i)
+                        if str(curr.day) == str(date_num):
+                            full_date_str = curr.strftime("%Y-%m-%d")
+                            break
+                except: pass
+
+            processed_data.append({"date": date_num, "full_date": full_date_str, "site": site, "began": began, "arrived": arrived, "left": left, "work": work_time, "travel": travel_time, "rest_break": rest_break_display, "productivity": prod_cat})
         
     if missing_weekdays and missing_selections:
         daily_hrs = contract_hours / 5.0
@@ -112,7 +125,16 @@ def process_timesheet_data(df, end_date_obj=None, missing_weekdays=None, missing
             reason = missing_selections.get(d_num, "Ignore")
             if reason != "Ignore":
                 hrs = daily_hrs if reason == "Annual Leave" else 0.0
-                processed_data.append({"date": d_num, "site": reason.upper(), "began": "", "arrived": "", "left": "", "work": hrs, "travel": 0.0, "rest_break": "", "productivity": "Non-Productive Work"})
+                full_date_str = ""
+                if end_date_obj:
+                    try:
+                        for i in range(7):
+                            curr = end_date_obj - timedelta(days=6-i)
+                            if str(curr.day) == str(d_num):
+                                full_date_str = curr.strftime("%Y-%m-%d")
+                                break
+                    except: pass
+                processed_data.append({"date": d_num, "full_date": full_date_str, "site": reason.upper(), "began": "", "arrived": "", "left": "", "work": hrs, "travel": 0.0, "rest_break": "", "productivity": "Non-Productive Work"})
                 
     if end_date_obj:
         def get_sort_date(d_num):
@@ -172,11 +194,18 @@ def generate_pdf_html(df_processed, engineer, week_end_date, week_number, on_cal
 # --- MULTI-FILE EXTRACTION ROUTINE ---
 uploaded_files = st.file_uploader("Upload Work-Style Timesheets (PDF)", type=["pdf"], accept_multiple_files=True, key=f"uploader_{st.session_state.uploader_key}")
 
+c1, c2, c3 = st.columns(3)
+def update_eng(): st.session_state.saved_engineer = st.session_state.eng_input
+def update_con(): st.session_state.saved_contract = st.session_state.con_input
+def update_serv(): st.session_state.saved_service_5yr = st.session_state.serv_input
+with c1: final_engineer = st.text_input("Engineer Name (Global)", value=st.session_state.saved_engineer, key="eng_input", on_change=update_eng)
+with c2: contract_hours = st.selectbox("Contracted Hours", options=[40, 45], index=0 if st.session_state.saved_contract == 40 else 1, key="con_input", on_change=update_con)
+with c3: st.checkbox("> 5 Years Service (+5 Days AL)", value=st.session_state.saved_service_5yr, key="serv_input", on_change=update_serv)
+
 datasets = {}
 master_analytics_data = []
 
 if uploaded_files:
-    # 1. EXTRACT DATA FIRST
     with st.spinner("Processing all uploaded timesheets..."):
         for uploaded_file in uploaded_files:
             extracted_data = []
@@ -242,15 +271,6 @@ if uploaded_files:
                 "dt_obj": dt_obj, "df": pd.DataFrame(extracted_data, columns=df_cols), "raw_text": raw_text_dump, "missing_selections": {}
             }
 
-    # 2. RENDER GLOBAL UI (Now populated with the name!)
-    st.markdown("### ⚙️ Global File Settings")
-    c1, c2 = st.columns(2)
-    def update_eng(): st.session_state.saved_engineer = st.session_state.eng_input
-    def update_con(): st.session_state.saved_contract = st.session_state.con_input
-    with c1: final_engineer = st.text_input("Engineer Name (Global)", value=st.session_state.saved_engineer, key="eng_input", on_change=update_eng)
-    with c2: contract_hours = st.selectbox("Contracted Hours", options=[40, 45], index=0 if st.session_state.saved_contract == 40 else 1, key="con_input", on_change=update_con)
-
-    # 3. THE BLANK TIMESHEET INTERCEPTOR & DATE TRIANGULATION
     st.markdown("---")
     st.markdown("### ⚠️ Global Timesheet Resolution")
     any_missing = False
@@ -259,14 +279,12 @@ if uploaded_files:
         if d_packet["df"].empty:
             any_missing = True
             st.warning(f"📄 **{file_name}** is completely blank (0 jobs logged).")
-            
             guessed_wk = d_packet["week_number"]
             guessed_we = d_packet["week_ending"]
             
             if not guessed_wk or guessed_wk == "Unknown":
                 fm = re.search(r"[Ww](?:eek)?[_\s]*(\d{1,2})", file_name)
                 if fm: guessed_wk = fm.group(1)
-                
             if guessed_wk and guessed_wk.isdigit() and (not guessed_we or guessed_we == ""):
                 ref_dt, ref_wk = None, None
                 for other_pack in datasets.values():
@@ -478,11 +496,16 @@ with tab3:
             for week_str, week_group in df_master.groupby("Week End"):
                 week_std_hrs, week_dt_hrs = 0.0, 0.0
                 leave_days = []
+                worked_bhs = 0
+                
                 for _, row in week_group.iterrows():
                     day_total = float(row['work']) + float(row['travel'])
                     is_dt = False
                     
-                    if str(row['date']) in bank_holidays: is_dt = True
+                    if str(row['date']) in bank_holidays:
+                        is_dt = True
+                        if day_total > 0: worked_bhs += 1 # TOIL Engine: Bank Holiday Worked!
+                        
                     try:
                         dt_obj = datetime.strptime(row['Week End'], "%d %b %Y")
                         for i in range(7):
@@ -495,7 +518,9 @@ with tab3:
                     
                     s_upper = str(row['site']).upper()
                     if "ANNUAL LEAVE" in s_upper or "SICK" in s_upper or "UNPAID LEAVE" in s_upper:
-                        leave_days.append(f"{row['date']} ({row['site']})")
+                        # Append explicit YYYY-MM-DD for HR tracking if available
+                        ld_str = f"{row['full_date']}:{s_upper}" if row.get("full_date") else f"{row['date']} ({s_upper})"
+                        leave_days.append(ld_str)
 
                 week_base = min(week_std_hrs, st.session_state.saved_contract)
                 week_ot = max(0, week_std_hrs - st.session_state.saved_contract)
@@ -505,7 +530,8 @@ with tab3:
                     "Standard": week_base,
                     "Overtime": week_ot,
                     "Double Time": week_dt_hrs,
-                    "Leave Days": ", ".join(leave_days)
+                    "Leave Days": ", ".join(leave_days),
+                    "Worked BHs": worked_bhs
                 }
             st.success("Uploaded timesheets processed and saved to your Personal Database!")
 
@@ -560,7 +586,6 @@ with tab3:
 
         st.dataframe(pd.DataFrame(payroll_data), use_container_width=True)
         
-        # --- ANNUAL EARNINGS PROJECTION ---
         actual_weeks_in_db = len(st.session_state.user_db["weeks"])
         if actual_weeks_in_db > 0:
             true_total_gross = (total_base_hrs * rate) + (total_ot_hrs * (rate * 1.5)) + (total_dt_hrs * (rate * 2.0))
@@ -584,17 +609,99 @@ with tab4:
     db_file = st.file_uploader("📂 Load Existing Database (.json)", type=["json"])
     if db_file is not None and st.session_state.last_uploaded_db != db_file.name:
         try:
-            # Safer JSON loading method for Streamlit file uploads
             data = json.loads(db_file.getvalue().decode("utf-8"))
             st.session_state.saved_engineer = data.get("name", st.session_state.saved_engineer)
             st.session_state.saved_rate = float(data.get("rate", st.session_state.saved_rate))
             st.session_state.saved_contract = int(data.get("contract", st.session_state.saved_contract))
+            st.session_state.saved_service_5yr = bool(data.get("service_5yr", st.session_state.saved_service_5yr))
             st.session_state.user_db["weeks"] = data.get("weeks", {})
             st.session_state.last_uploaded_db = db_file.name
             st.success("Database loaded successfully!")
             st.rerun()
         except Exception as e:
             st.error(f"Invalid database file. Make sure it is a previously exported .json file. Error: {e}")
+
+    # --- HR LEAVE & BRADFORD FACTOR TRACKER ---
+    if st.session_state.user_db["weeks"]:
+        st.markdown("---")
+        st.markdown("### 🏖️ HR & Bradford Factor Dashboard")
+        
+        # 1. Date Extraction & Parsing
+        all_sick_dates = []
+        all_al_dates = []
+        total_bhs_worked = 0
+        
+        latest_date_in_db = datetime.min
+        
+        for w_str, w_data in st.session_state.user_db["weeks"].items():
+            try:
+                w_dt = datetime.strptime(w_str, "%d %b %Y")
+                if w_dt > latest_date_in_db: latest_date_in_db = w_dt
+            except: pass
+            
+            total_bhs_worked += int(w_data.get("Worked BHs", 0))
+            
+            l_days = w_data.get("Leave Days", "")
+            if l_days:
+                for entry in l_days.split(","):
+                    entry = entry.strip()
+                    if ":" in entry:
+                        date_str, reason = entry.split(":")
+                        try:
+                            parsed_dt = datetime.strptime(date_str, "%Y-%m-%d")
+                            if "SICK" in reason: all_sick_dates.append(parsed_dt)
+                            elif "ANNUAL LEAVE" in reason: all_al_dates.append(parsed_dt)
+                        except: pass
+
+        # 2. Leave Year Calculation (Feb 1st to Jan 31st)
+        if latest_date_in_db != datetime.min:
+            if latest_date_in_db.month >= 2:
+                leave_yr_start = datetime(latest_date_in_db.year, 2, 1)
+                leave_yr_end = datetime(latest_date_in_db.year + 1, 1, 31)
+            else:
+                leave_yr_start = datetime(latest_date_in_db.year - 1, 2, 1)
+                leave_yr_end = datetime(latest_date_in_db.year, 1, 31)
+                
+            ly_str = f"{leave_yr_start.strftime('%b %Y')} - {leave_yr_end.strftime('%b %Y')}"
+            
+            al_taken_this_year = sum(1 for d in all_al_dates if leave_yr_start <= d <= leave_yr_end)
+            
+            base_leave = 31 # 23 Base + 8 BH
+            service_bonus = 5 if st.session_state.saved_service_5yr else 0
+            total_entitlement = base_leave + service_bonus + total_bhs_worked
+            remaining_leave = total_entitlement - al_taken_this_year
+            
+            h1, h2, h3, h4 = st.columns(4)
+            h1.metric("Leave Year", ly_str)
+            h2.metric("Total Entitlement (Inc TOIL)", f"{total_entitlement} Days")
+            h3.metric("Annual Leave Taken", f"{al_taken_this_year} Days")
+            h4.metric("Remaining Balance", f"{remaining_leave} Days", delta=f"{total_bhs_worked} TOIL Earned", delta_color="normal")
+
+        # 3. Bradford Factor Engine (Rolling 52 Weeks)
+        st.markdown("#### 🤒 Bradford Factor (Rolling 52-Week)")
+        rolling_start = latest_date_in_db - timedelta(weeks=52) if latest_date_in_db != datetime.min else datetime.min
+        
+        valid_sick_dates = sorted([d for d in all_sick_dates if d >= rolling_start])
+        
+        spells = 0
+        total_sick_days = len(valid_sick_dates)
+        
+        if total_sick_days > 0:
+            spells = 1
+            for i in range(1, total_sick_days):
+                # If gap is > 3 days, it's a new spell (allows for sick Friday + sick Monday = 1 spell)
+                if (valid_sick_dates[i] - valid_sick_dates[i-1]).days > 3:
+                    spells += 1
+                    
+        bradford_score = (spells ** 2) * total_sick_days
+        
+        b1, b2, b3 = st.columns(3)
+        b1.metric("Spells (Instances)", spells)
+        b2.metric("Total Sick Days", total_sick_days)
+        
+        if bradford_score < 50: b3.success(f"**Bradford Factor: {bradford_score}** (Healthy)")
+        elif bradford_score < 125: b3.warning(f"**Bradford Factor: {bradford_score}** (Monitor)")
+        else: b3.error(f"**Bradford Factor: {bradford_score}** (Action Required)")
 
     st.markdown("---")
     st.markdown("#### Edit Historical Records")
@@ -616,17 +723,18 @@ with tab4:
                         "Standard": float(row.get("Standard", 0.0)),
                         "Overtime": float(row.get("Overtime", 0.0)),
                         "Double Time": float(row.get("Double Time", 0.0)),
-                        "Leave Days": str(row.get("Leave Days", ""))
+                        "Leave Days": str(row.get("Leave Days", "")),
+                        "Worked BHs": int(row.get("Worked BHs", 0))
                     }
             st.session_state.user_db["weeks"] = new_weeks
-            st.success("Memory updated! Go to Tab 3 to see the adjusted Salary projections.")
+            st.success("Memory updated! Projections and HR trackers recalculated.")
 
         st.markdown("---")
-        # --- EXPORT ROUTINE ---
         export_data = {
             "name": st.session_state.saved_engineer,
             "rate": st.session_state.saved_rate,
             "contract": st.session_state.saved_contract,
+            "service_5yr": st.session_state.saved_service_5yr,
             "weeks": st.session_state.user_db["weeks"]
         }
         json_str = json.dumps(export_data, indent=4)
