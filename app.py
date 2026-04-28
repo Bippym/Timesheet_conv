@@ -84,7 +84,9 @@ def process_timesheet_data(df, end_date_obj=None, missing_weekdays=None, missing
                 pending_break_mins += b_mins
                 continue 
 
-            if began == "" and len(processed_data) > 0: began = processed_data[-1]["left"]
+            if began == "" and len(processed_data) > 0:
+                if date_num == processed_data[-1]["date"]:
+                    began = processed_data[-1]["left"]
                 
             travel_time, work_time = calc_hours(began, arrived), calc_hours(arrived, left)
             rest_break_display = ""
@@ -194,7 +196,7 @@ if uploaded_files:
     with st.spinner("Processing all uploaded timesheets..."):
         for uploaded_file in uploaded_files:
             extracted_data = []
-            week_ending_str, week_number = "", ""
+            week_ending_str, week_number = "", "Unknown"
             raw_text_dump = ""
             
             with pdfplumber.open(uploaded_file) as pdf:
@@ -216,16 +218,19 @@ if uploaded_files:
                             if eng_str: st.session_state.saved_engineer = eng_str
 
                     for line in text.split('\n'):
-                        raw_times = re.findall(r'[0-9Oo]{1,2}:[0-9Oo]{2}', line)
+                        # FORGIVING TIME FINDER (Allows dots/semicolons)
+                        raw_times = re.findall(r'[0-9Oo]{1,2}[:.;][0-9Oo]{2}', line)
                         if len(raw_times) >= 1: 
                             first_time_idx = line.find(raw_times[0])
                             raw_site = line[:first_time_idx].strip()
-                            date_match = re.search(r"^([A-Z]\s*)?(\d{1,2})\s+", raw_site)
+                            
+                            # MULTI-LETTER DATE MATCHER (Catches "SUN")
+                            date_match = re.search(r"^([A-Za-z]{1,3}\s*)?(\d{1,2})\s+", raw_site)
                             date_num = date_match.group(2) if date_match else ""
                             
                             site_clean = re.split(r"\*+QUO|\*?QUOTE", raw_site, flags=re.IGNORECASE)[0].strip()
                             site_clean = re.split(r"£|R1 OA|\b[A-Z0-9]{3,}:", site_clean)[0].strip()
-                            site_clean = re.sub(r"^([A-Z]\s*)?\d{1,2}\s+", "", site_clean) 
+                            site_clean = re.sub(r"^([A-Za-z]{1,3}\s*)?\d{1,2}\s+", "", site_clean) 
                             site_clean = re.sub(r"\s+\d+$", "", site_clean).strip() 
                             site_clean = re.sub(r"\s+\d+\.\d+$", "", site_clean).strip() 
                             site_clean = re.sub(r"\s+[A-Z0-9\s]{1,10}SC$", "", site_clean).strip() 
@@ -233,7 +238,7 @@ if uploaded_files:
                             
                             times = []
                             for t in raw_times:
-                                t_clean = t.replace('O', '0').replace('o', '0')
+                                t_clean = t.replace('O', '0').replace('o', '0').replace('.', ':').replace(';', ':')
                                 hr, mn = t_clean.split(':')
                                 if hr.isdigit() and int(hr) > 23: hr = hr[0]
                                 times.append(f"{hr}:{mn}")
@@ -275,9 +280,7 @@ if uploaded_files:
         if d_packet["df"].empty:
             any_missing = True
             st.warning(f"📄 **{file_name}** is completely blank (0 jobs logged).")
-            st.markdown("Please confirm the details below to generate a Timesheet for this absence:")
             
-            # Form to assign Week End Date and Reason to completely blank files
             c1, c2, c3 = st.columns(3)
             with c1: manual_we = st.text_input("Week End Date (e.g. 26 Apr 2026)", value=d_packet["week_ending"], key=f"we_{file_name}")
             with c2: manual_wk = st.text_input("Week Number", value=d_packet["week_number"], key=f"wk_{file_name}")
@@ -299,7 +302,6 @@ if uploaded_files:
                     if curr.weekday() < 5: 
                         datasets[file_name]["missing_selections"][str(curr.day)] = full_week_reason
         else:
-            # Standard Missing Days Resolver for partially filled sheets
             if d_packet["dt_obj"]:
                 expected_weekdays = [(str((d_packet["dt_obj"] - timedelta(days=6-i)).day), (d_packet["dt_obj"] - timedelta(days=6-i)).strftime("%A")) for i in range(7) if (d_packet["dt_obj"] - timedelta(days=6-i)).weekday() < 5]
                 extracted_dates = d_packet["df"]["Date Num"].replace("", pd.NA).dropna().unique().tolist()
@@ -316,7 +318,7 @@ if uploaded_files:
     if not any_missing:
         st.success("No missing weekdays detected across all uploaded files. Ready to generate!")
 
-    # 3. Compile Master Analytics Data (using the resolved missing days)
+    # 3. Compile Master Analytics Data
     for file_name, d_packet in datasets.items():
         missing_weekdays_info = []
         if d_packet["dt_obj"]:
@@ -332,7 +334,6 @@ if uploaded_files:
             row["File"] = file_name
             master_analytics_data.append(row)
 
-
     # --- TABBED INTERFACE ---
     tab1, tab2 = st.tabs(["📑 Individual Editor & Batch Export", "📈 Master Analytics & Pay"])
 
@@ -345,7 +346,20 @@ if uploaded_files:
         df_edit = data_packet["df"][["Date Num", "Site & Ref No.", "Began Journey", "Arrived On Site", "Left Site", "Original Row Info"]]
         edited_df = st.data_editor(df_edit, num_rows="dynamic", use_container_width=True)
 
-        if st.button(f"Generate PDF for {selected_file}", type="primary"):
+        # Live Formatted Pay Estimator per Document
+        with st.expander("💰 Expected Pay Calculator (Live)", expanded=False):
+            p1, p2 = st.columns(2)
+            def update_rate(): st.session_state.saved_rate = st.session_state.rate_input
+            with p1: rate = st.number_input("Hourly Rate (£)", value=st.session_state.saved_rate, step=0.50, format="%.2f", key="rate_input", on_change=update_rate)
+            
+            bh_options = []
+            if data_packet["dt_obj"]:
+                for i in range(7):
+                    curr = data_packet["dt_obj"] - timedelta(days=6-i)
+                    bh_options.append(f"{curr.strftime('%A')} {curr.day} ({data_packet['week_ending']})")
+            
+            with p2: bank_holidays_raw = st.multiselect("Select Bank Holidays (Pays 2x):", options=bh_options, key="bh_single")
+            
             missing_weekdays_info = []
             if data_packet["dt_obj"]:
                 expected_weekdays = [(str((data_packet["dt_obj"] - timedelta(days=6-i)).day), (data_packet["dt_obj"] - timedelta(days=6-i)).strftime("%A")) for i in range(7) if (data_packet["dt_obj"] - timedelta(days=6-i)).weekday() < 5]
@@ -354,9 +368,42 @@ if uploaded_files:
                 
             processed_data = process_timesheet_data(edited_df, data_packet["dt_obj"], missing_weekdays_info, data_packet["missing_selections"], contract_hours)
             
+            double_time_hours, standard_time_hours = 0.0, 0.0
+            for date, group in pd.DataFrame(processed_data).groupby("date", sort=False):
+                day_total = group['work'].sum() + group['travel'].sum()
+                is_double_time = False
+                
+                try:
+                    row_curr = None
+                    for i in range(7):
+                        curr = data_packet["dt_obj"] - timedelta(days=6-i)
+                        if str(curr.day) == str(date):
+                            row_curr = curr
+                            if curr.weekday() == 6: is_double_time = True
+                            break
+                    if row_curr:
+                        row_bh_str = f"{row_curr.strftime('%A')} {row_curr.day} ({data_packet['week_ending']})"
+                        if row_bh_str in bank_holidays_raw: is_double_time = True
+                except: pass
+                
+                if is_double_time: double_time_hours += day_total
+                else: standard_time_hours += day_total
+
+            base_hrs = min(standard_time_hours, contract_hours)
+            overtime_hrs = max(0, standard_time_hours - contract_hours)
+            base_pay, overtime_pay, double_pay = base_hrs * rate, overtime_hrs * (rate * 1.5), double_time_hours * (rate * 2.0)
+            
+            st.markdown("---")
+            st.markdown(f"**Standard Hours ({base_hrs:.2f} hrs at £{rate:.2f}/hr):** £{base_pay:.2f}")
+            if overtime_hrs > 0: st.markdown(f"**Overtime 1.5x ({overtime_hrs:.2f} hrs at £{rate*1.5:.2f}/hr):** £{overtime_pay:.2f}")
+            if double_time_hours > 0: st.markdown(f"**Sunday/Bank Hol 2x ({double_time_hours:.2f} hrs at £{rate*2.0:.2f}/hr):** £{double_pay:.2f}")
+            st.success(f"### Estimated Gross Pay: £{(base_pay + overtime_pay + double_pay):.2f}")
+
+        # PDF Generator Section
+        if st.button(f"Generate PDF for {selected_file}", type="primary"):
             has_weekend = False
             if not edited_df.empty:
-                has_weekend = any(re.match(r"^[S]\s*\d{1,2}", str(info)) for info in edited_df["Original Row Info"])
+                has_weekend = any(re.match(r"^(S|SA|SAT|SU|SUN)\s*\d{1,2}", str(info).upper()) for info in edited_df["Original Row Info"])
             on_call_status = "Yes" if has_weekend else "No"
             
             html_content = generate_pdf_html(processed_data, final_engineer, data_packet["week_ending"], data_packet["week_number"], on_call_status)
@@ -381,7 +428,7 @@ if uploaded_files:
                     
                     has_wknd = False
                     if not d_pack["df"].empty:
-                        has_wknd = any(re.match(r"^[S]\s*\d{1,2}", str(info)) for info in d_pack["df"]["Original Row Info"])
+                        has_wknd = any(re.match(r"^(S|SA|SAT|SU|SUN)\s*\d{1,2}", str(info).upper()) for info in d_pack["df"]["Original Row Info"])
                     oc_status = "Yes" if has_wknd else "No"
                     
                     b_html = generate_pdf_html(batch_proc_data, final_engineer, d_pack["week_ending"], d_pack["week_number"], oc_status)
@@ -440,8 +487,7 @@ if uploaded_files:
             st.markdown("---")
             st.markdown("### 💰 Master Pay Calculator")
             p1, p2 = st.columns(2)
-            def update_rate(): st.session_state.saved_rate = st.session_state.rate_input
-            with p1: rate = st.number_input("Global Hourly Rate (£)", value=st.session_state.saved_rate, step=0.50, format="%.2f", key="rate_input", on_change=update_rate)
+            with p1: rate = st.number_input("Global Hourly Rate (£)", value=st.session_state.saved_rate, step=0.50, format="%.2f", key="global_rate_input", on_change=update_rate)
             
             all_dt_strs = df_filtered["Week End"].unique()
             bh_options = []
@@ -454,7 +500,6 @@ if uploaded_files:
                 except: pass
             
             with p2: bank_holidays_raw = st.multiselect("Select Bank Holidays in Filtered Range (Pays 2x):", options=list(set(bh_options)))
-            bank_holidays = [b.split(" ")[1] for b in bank_holidays_raw]
 
             total_base_hrs, total_ot_hrs, total_dt_hrs = 0.0, 0.0, 0.0
 
@@ -464,13 +509,15 @@ if uploaded_files:
                     day_total = float(row['work']) + float(row['travel'])
                     is_double_time = False
                     
-                    if str(row['date']) in bank_holidays: is_double_time = True
-                    
                     try:
                         dt_obj = datetime.strptime(row['Week End'], "%d %b %Y")
                         for i in range(7):
                             curr = dt_obj - timedelta(days=6-i)
-                            if str(curr.day) == str(row['date']) and curr.weekday() == 6: is_double_time = True
+                            if str(curr.day) == str(row['date']):
+                                row_bh_str = f"{curr.strftime('%A')} {curr.day} ({row['Week End']})"
+                                if row_bh_str in bank_holidays_raw: is_double_time = True
+                                if curr.weekday() == 6: is_double_time = True
+                                break
                     except: pass
                     
                     if is_double_time: week_dt_hrs += day_total
