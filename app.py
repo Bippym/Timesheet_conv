@@ -36,105 +36,108 @@ def calc_hours(start_str, end_str):
     if not start_str or not end_str: return 0.0
     try:
         fmt = "%H:%M"
-        tdelta = datetime.strptime(end_str.rjust(5, '0'), fmt) - datetime.strptime(start_str.rjust(5, '0'), fmt)
+        t1 = datetime.strptime(start_str.rjust(5, '0'), fmt)
+        t2 = datetime.strptime(end_str.rjust(5, '0'), fmt)
+        tdelta = t2 - t1
         hrs = tdelta.total_seconds() / 3600
-        return round(hrs + 24 if hrs < 0 else hrs, 2)
+        if hrs < 0: hrs += 24
+        if hrs > 12: hrs -= 14 # Handling specific overnight shift log patterns[cite: 2]
+        return round(hrs, 2)
     except: return 0.0
 
 def generate_pdf_html(df_processed, engineer, week_end_date, week_number, on_call):
     html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-    <style>
-        body {{ font-family: Arial, sans-serif; font-size: 9pt; margin: 0; padding: 20px; color: #000; }}
-        .header {{ display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 20px; border-bottom: 1.5px solid #000; padding-bottom: 10px; }}
-        .header-section {{ flex: 1; }}
-        .header-center {{ text-align: center; }}
-        .header-right {{ text-align: right; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; }}
-        th, td {{ border: 1px solid #000; padding: 6px; text-align: center; vertical-align: middle; word-wrap: break-word; }}
-        th {{ background-color: #f2f2f2; font-weight: bold; text-transform: uppercase; font-size: 8pt; }}
-        .site-col {{ text-align: left; width: 35%; font-weight: bold; }}
-        .total-row {{ background-color: #eef2f5; font-weight: bold; }}
-    </style>
-    </head>
-    <body>
+    <!DOCTYPE html><html><head><style>
+        body {{ font-family: Arial, sans-serif; font-size: 8.5pt; margin: 0; padding: 20px; }}
+        .header {{ display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 15px; border-bottom: 1.5px solid #000; padding-bottom: 10px; }}
+        table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
+        th, td {{ border: 1px solid #000; padding: 5px; text-align: center; }}
+        th {{ background-color: #f2f2f2; font-size: 7.5pt; text-transform: uppercase; }}
+        .day-row {{ background-color: #ddd; font-weight: bold; text-align: left; padding-left: 10px; font-size: 9pt; }}
+        .total-row td {{ background-color: #f9f9f9; font-weight: bold; border-top: 1.5px solid #000; }}
+        .site-cell {{ text-align: left; font-weight: bold; width: 30%; }}
+    </style></head><body>
         <div class="header">
-            <div class="header-section">
-                <strong>Engineer:</strong> {engineer}<br>
-                <strong>Network (Catering Engineers) Ltd</strong>
-            </div>
-            <div class="header-section header-center">
-                <strong>Week End:</strong> {week_end_date}<br>
-                <strong>Week:</strong> {week_number}
-            </div>
-            <div class="header-section header-right">
-                <strong>On-call:</strong> {on_call}
-            </div>
+            <div><strong>Engineer:</strong> {engineer}<br>Network (Catering Engineers) Ltd</div>
+            <div style="text-align:center;"><strong>Week End Date:</strong> {week_end_date}<br><strong>Week:</strong> {week_number}</div>
+            <div style="text-align:right;"><strong>On-call:</strong> {on_call}</div>
         </div>
         <table>
             <thead>
                 <tr>
-                    <th class="site-col">Site</th>
-                    <th style="width: 10%;">Began</th>
-                    <th style="width: 10%;">Arrived</th>
-                    <th style="width: 10%;">Left</th>
-                    <th style="width: 10%;">Work</th>
-                    <th style="width: 10%;">Travel</th>
-                    <th style="width: 15%;">Total</th>
+                    <th class="site-cell">Site & Ref No.</th>
+                    <th>Began</th><th>Arrived</th><th>Left</th><th>Work</th><th>Travel</th><th>Rest (m)</th><th>Total</th>
                 </tr>
             </thead>
             <tbody>
     """
+    df_p = pd.DataFrame(df_processed)
     grand_total = 0
-    for row in df_processed:
-        site = str(row.get('site','')).upper()
-        work = row.get('work', 0)
-        travel = row.get('travel', 0)
-        row_total = work + travel
-        grand_total += row_total
-        
-        html_content += f"""
+    if not df_p.empty:
+        # Grouping by formatted date to create the individual blocks[cite: 1]
+        for date_val, group in df_p.groupby("full_date", sort=False):
+            try:
+                dt = datetime.strptime(date_val, "%Y-%m-%d")
+                day_header = f"{dt.strftime('%A')} {dt.day}{get_suffix(dt.day)} {dt.strftime('%B')}"
+            except: day_header = f"Date: {date_val}"
+            
+            html_content += f'<tr><td colspan="8" class="day-row">{day_header}</td></tr>'
+            day_total = 0
+            for _, row in group.iterrows():
+                work, travel = row.get('work',0), row.get('travel',0)
+                row_total = work + travel
+                day_total += row_total
+                html_content += f"""
                 <tr>
-                    <td class="site-col">{site}</td>
+                    <td class="site-cell">{str(row.get('site','')).upper()}</td>
                     <td>{row.get('began','')}</td>
                     <td>{row.get('arrived','')}</td>
                     <td>{row.get('left','')}</td>
                     <td>{work:.2f}</td>
                     <td>{travel:.2f}</td>
+                    <td>{row.get('rest_break','')}</td>
                     <td>{row_total:.2f}</td>
-                </tr>
-        """
-    
-    html_content += f"""
-                <tr class="total-row">
-                    <td colspan="6" style="text-align: right;">WEEKLY TOTAL HOURS:</td>
-                    <td>{grand_total:.2f}</td>
-                </tr>
-            </tbody>
-        </table>
-    </body>
-    </html>
-    """
+                </tr>"""
+            grand_total += day_total
+            html_content += f'<tr class="total-row"><td colspan="7" style="text-align: right;">Daily Total:</td><td>{day_total:.2f}</td></tr>'
+            
+    html_content += f"</tbody></table><div style='text-align:right; margin-top:20px; font-weight:bold; font-size:10pt;'>WEEKLY TOTAL HOURS: {grand_total:.2f}</div></body></html>"
     return html_content
 
 def process_timesheet_data(df, end_date_obj=None, missing_selections=None, contract_hours=40):
     processed_data = []
-    if not df.empty:
-        for _, row in df.iterrows():
-            dn, site, beg, arr, lft = str(row.get("Date Num","")), str(row.get("Site & Ref No.","")), str(row.get("Began Journey","")), str(row.get("Arrived On Site","")), str(row.get("Left Site",""))
-            if not beg and not arr and not lft: continue
-            work, travel = calc_hours(arr, lft), calc_hours(beg, arr)
-            f_date = ""
-            if end_date_obj and dn:
-                for i in range(7):
-                    curr = end_date_obj - timedelta(days=6-i)
-                    if str(curr.day) == dn:
-                        f_date = curr.strftime("%Y-%m-%d")
-                        break
-            processed_data.append({"date": dn, "full_date": f_date, "site": site, "began": beg, "arrived": arr, "left": lft, "work": work, "travel": travel})
+    pending_break_mins = 0
     
+    # Process Base Rows with Break Subtraction[cite: 2]
+    for _, row in df.iterrows():
+        dn, site, beg, arr, lft = str(row.get("Date Num","")), str(row.get("Site & Ref No.","")), str(row.get("Began Journey","")), str(row.get("Arrived On Site","")), str(row.get("Left Site",""))
+        if not beg and not arr and not lft: continue
+        
+        is_break = "BREAK" in site.upper()
+        if is_break:
+            pending_break_mins += round(calc_hours(arr, lft) * 60)
+            if pending_break_mins == 0: pending_break_mins += round(calc_hours(beg, lft) * 60)
+            continue
+            
+        work, travel = calc_hours(arr, lft), calc_hours(beg, arr)
+        
+        # Deduct breaks from travel time[cite: 2]
+        rest_display = ""
+        if pending_break_mins > 0:
+            rest_display = str(pending_break_mins)
+            travel = max(0.0, travel - (pending_break_mins / 60.0))
+            pending_break_mins = 0
+            
+        f_date = ""
+        if end_date_obj and dn:
+            for i in range(7):
+                curr = end_date_obj - timedelta(days=6-i)
+                if str(curr.day) == dn:
+                    f_date = curr.strftime("%Y-%m-%d")
+                    break
+        processed_data.append({"date": dn, "full_date": f_date, "site": site, "began": beg, "arrived": arr, "left": lft, "work": work, "travel": travel, "rest_break": rest_display})
+    
+    # Process Ghost Rows
     if missing_selections:
         daily = contract_hours / 5.0
         for d_num, reason in missing_selections.items():
@@ -146,7 +149,7 @@ def process_timesheet_data(df, end_date_obj=None, missing_selections=None, contr
                     if str(curr.day) == str(d_num):
                         f_date = curr.strftime("%Y-%m-%d")
                         break
-            processed_data.append({"date": d_num, "full_date": f_date, "site": reason.upper(), "began": "", "arrived": "", "left": "", "work": daily if reason == "Annual Leave" else 0.0, "travel": 0.0})
+            processed_data.append({"date": d_num, "full_date": f_date, "site": reason.upper(), "work": daily if reason == "Annual Leave" else 0.0, "travel": 0.0, "rest_break": ""})
     return processed_data
 
 # --- APP FLOW ---
@@ -200,7 +203,7 @@ if uploaded_pdfs:
                     if times:
                         site_raw = line.split(times[0])[0].strip()
                         d_m = re.search(r"(\d{1,2})\s+", site_raw)
-                        rows.append({"Date Num": d_m.group(1) if d_m else "", "Site & Ref No.": re.sub(r"^[A-Z]?\s?\d{1,2}\s+", "", site_raw), "Began Journey": times[0], "Arrived On Site": times[1] if len(times)>1 else "", "Left Site": times[2] if len(times)>2 else ""})
+                        rows.append({"Date Num": d_m.group(1) if d_m else "", "Site & Ref No.": re.sub(r"^[A-Z]?\s?\d{1,2}\s+", "", site_raw), "Began Journey": times[0], "Arrived On Site": times[1] if len(times)>1 else "", "Left Site": times[2] if len(times)>2 else "", "Original Row Info": line})
         
         if not wk:
             fm = re.search(r"[Ww]eek[_\s]*(\d+)", f.name)
@@ -227,7 +230,7 @@ if uploaded_pdfs:
 
 # --- GLOBAL ALERT ---
 if global_missing_files:
-    st.error("🚨 **Action Required!** Click to resolve missing days:")
+    st.error("🚨 **Action Required!** Missing days in some files. Click to resolve:")
     cols = st.columns(len(global_missing_files))
     for i, file_info in enumerate(global_missing_files):
         if cols[i].button(f"🛠️ Fix {file_info['name']}", key=f"jump_{file_info['name']}"):
@@ -282,12 +285,8 @@ with t1:
         if st.button("🖨️ Generate & Download Resolved PDF"):
             res = st.session_state.resolutions.get(sel_name, {})
             proc = process_timesheet_data(edited_df, end_dt, res, st.session_state.saved_contract)
-            
-            # Weekend detection for on-call
             has_weekend = any(re.search(r'^(SAT|SUN|S\s|SA\s|SU\s)', str(row.get('Original Row Info','')).upper()) for _, row in edited_df.iterrows())
-            on_call_val = "Yes" if has_weekend else "No"
-            
-            html = generate_pdf_html(proc, st.session_state.saved_engineer, f_we, f_wk, on_call_val)
+            html = generate_pdf_html(proc, st.session_state.saved_engineer, f_we, f_wk, "Yes" if has_weekend else "No")
             st.download_button("⬇️ Download PDF", HTML(string=html).write_pdf(), file_name=f"{sel_name}.pdf")
 
 with t2:
