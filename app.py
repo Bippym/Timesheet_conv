@@ -62,41 +62,44 @@ def get_productivity_category(site_name):
 def process_timesheet_data(df, end_date_obj=None, missing_weekdays=None, missing_selections=None, contract_hours=40):
     processed_data = []
     pending_break_mins = 0
-    for index, row in df.iterrows():
-        date_num, site, arrived, left, began = str(row["Date Num"]), str(row["Site & Ref No."]), str(row["Arrived On Site"]), str(row["Left Site"]), str(row["Began Journey"])
-        is_break = "BREAK" in site.upper()
-        
-        if not is_break and len(processed_data) > 0:
-            prev_left = processed_data[-1]["left"]
-            prev_date = processed_data[-1]["date"]
-            if date_num == prev_date and prev_left != "" and pending_break_mins == 0: began = prev_left
-                
-        if len(processed_data) > 0: began = fix_time_string(began, processed_data[-1]["left"])
-        arrived = fix_time_string(arrived, began)
-        left = fix_time_string(left, arrived)
-        
-        if is_break:
-            b_mins = round(calc_hours(arrived, left) * 60)
-            if b_mins == 0: b_mins = round(calc_hours(began, left) * 60) 
-            if b_mins == 0: b_mins = round(calc_hours(began, arrived) * 60) 
-            pending_break_mins += b_mins
-            continue 
+    
+    # Ensure df isn't completely empty before iterating to avoid errors
+    if not df.empty:
+        for index, row in df.iterrows():
+            date_num, site, arrived, left, began = str(row["Date Num"]), str(row["Site & Ref No."]), str(row["Arrived On Site"]), str(row["Left Site"]), str(row["Began Journey"])
+            is_break = "BREAK" in site.upper()
+            
+            if not is_break and len(processed_data) > 0:
+                prev_left = processed_data[-1]["left"]
+                prev_date = processed_data[-1]["date"]
+                if date_num == prev_date and prev_left != "" and pending_break_mins == 0: began = prev_left
+                    
+            if len(processed_data) > 0: began = fix_time_string(began, processed_data[-1]["left"])
+            arrived = fix_time_string(arrived, began)
+            left = fix_time_string(left, arrived)
+            
+            if is_break:
+                b_mins = round(calc_hours(arrived, left) * 60)
+                if b_mins == 0: b_mins = round(calc_hours(began, left) * 60) 
+                if b_mins == 0: b_mins = round(calc_hours(began, arrived) * 60) 
+                pending_break_mins += b_mins
+                continue 
 
-        if began == "" and len(processed_data) > 0: began = processed_data[-1]["left"]
+            if began == "" and len(processed_data) > 0: began = processed_data[-1]["left"]
+                
+            travel_time, work_time = calc_hours(began, arrived), calc_hours(arrived, left)
+            rest_break_display = ""
+            if pending_break_mins > 0:
+                rest_break_display = str(pending_break_mins)
+                travel_time = max(0.0, travel_time - (pending_break_mins / 60.0))
+                pending_break_mins = 0 
+                
+            prod_cat = "Ignored" if ("HOME" in site.upper() or "BREAK" in site.upper() or work_time == 0) else get_productivity_category(site)
             
-        travel_time, work_time = calc_hours(began, arrived), calc_hours(arrived, left)
-        rest_break_display = ""
-        if pending_break_mins > 0:
-            rest_break_display = str(pending_break_mins)
-            travel_time = max(0.0, travel_time - (pending_break_mins / 60.0))
-            pending_break_mins = 0 
-            
-        prod_cat = "Ignored" if ("HOME" in site.upper() or "BREAK" in site.upper() or work_time == 0) else get_productivity_category(site)
-        
-        processed_data.append({
-            "date": date_num, "site": site, "began": began, "arrived": arrived, "left": left, 
-            "work": work_time, "travel": travel_time, "rest_break": rest_break_display, "productivity": prod_cat
-        })
+            processed_data.append({
+                "date": date_num, "site": site, "began": began, "arrived": arrived, "left": left, 
+                "work": work_time, "travel": travel_time, "rest_break": rest_break_display, "productivity": prod_cat
+            })
         
     if missing_weekdays and missing_selections:
         daily_hrs = contract_hours / 5.0
@@ -150,27 +153,28 @@ def generate_pdf_html(df_processed, engineer, week_end_date, week_number, on_cal
     
     df_proc = pd.DataFrame(df_processed)
     grand_total = 0
-    for date, group in df_proc.groupby("date", sort=False):
-        try:
-            end_date_obj_html = datetime.strptime(week_end_date, "%d %b %Y")
-            day_str = f"Date: {date}"
-            for i in range(7):
-                curr = end_date_obj_html - timedelta(days=6-i)
-                if str(curr.day) == str(date):
-                    suffix = 'th' if 11 <= curr.day <= 13 else {1: 'st', 2: 'nd', 3: 'rd'}.get(curr.day % 10, 'th')
-                    day_str = curr.strftime(f"%A {curr.day}{suffix} %B")
-                    break
-        except: day_str = f"Date: {date}"
-            
-        html_content += f'<tr><td colspan="10" class="day-row">{day_str}</td></tr>'
-        day_total = 0
-        for _, row in group.iterrows():
-            row_total = row['work'] + row['travel']
-            html_content += f"<tr><td>{row['site']}</td><td></td><td></td><td>{row['began']}</td><td>{row['arrived']}</td><td>{row['left']}</td><td>{row['work']:.2f}</td><td>{row['rest_break']}</td><td>{row['travel']:.2f}</td><td>{row_total:.2f}</td></tr>"
-            day_total += row_total
-            
-        grand_total += day_total
-        html_content += f'<tr class="total-row"><td colspan="9" style="text-align: right;"><strong>Daily Total:</strong></td><td><strong>{day_total:.2f}</strong></td></tr>'
+    if not df_proc.empty:
+        for date, group in df_proc.groupby("date", sort=False):
+            try:
+                end_date_obj_html = datetime.strptime(week_end_date, "%d %b %Y")
+                day_str = f"Date: {date}"
+                for i in range(7):
+                    curr = end_date_obj_html - timedelta(days=6-i)
+                    if str(curr.day) == str(date):
+                        suffix = 'th' if 11 <= curr.day <= 13 else {1: 'st', 2: 'nd', 3: 'rd'}.get(curr.day % 10, 'th')
+                        day_str = curr.strftime(f"%A {curr.day}{suffix} %B")
+                        break
+            except: day_str = f"Date: {date}"
+                
+            html_content += f'<tr><td colspan="10" class="day-row">{day_str}</td></tr>'
+            day_total = 0
+            for _, row in group.iterrows():
+                row_total = row['work'] + row['travel']
+                html_content += f"<tr><td>{row['site']}</td><td></td><td></td><td>{row['began']}</td><td>{row['arrived']}</td><td>{row['left']}</td><td>{row['work']:.2f}</td><td>{row['rest_break']}</td><td>{row['travel']:.2f}</td><td>{row_total:.2f}</td></tr>"
+                day_total += row_total
+                
+            grand_total += day_total
+            html_content += f'<tr class="total-row"><td colspan="9" style="text-align: right;"><strong>Daily Total:</strong></td><td><strong>{day_total:.2f}</strong></td></tr>'
     
     html_content += f"</tbody></table><div style='margin-top: 20px; font-weight: bold; text-align: right; border-top: 1px solid #000; padding-top: 5px;'>Weekly Total Hours: {grand_total:.2f}</div></body></html>"
     return html_content
@@ -252,12 +256,16 @@ if uploaded_files:
                 dt_obj = None
                 month_label = "Unknown Month"
 
+            # THE FIX: Force the creation of skeleton columns even if extracted_data is empty
+            df_cols = ["Date Num", "Original Row Info", "Site & Ref No.", "Began Journey", "Arrived On Site", "Left Site"]
+            df_extracted = pd.DataFrame(extracted_data, columns=df_cols)
+
             datasets[uploaded_file.name] = {
                 "week_ending": week_ending_str,
                 "week_number": week_number,
                 "month_label": month_label,
                 "dt_obj": dt_obj,
-                "df": pd.DataFrame(extracted_data),
+                "df": df_extracted,
                 "raw_text": raw_text_dump,
                 "missing_selections": {}
             }
@@ -332,8 +340,11 @@ if uploaded_files:
                 
             processed_data = process_timesheet_data(edited_df, data_packet["dt_obj"], missing_weekdays_info, data_packet["missing_selections"], contract_hours)
             
-            has_weekend = any(re.match(r"^[S]\s*\d{1,2}", str(info)) for info in edited_df["Original Row Info"])
+            has_weekend = False
+            if not edited_df.empty:
+                has_weekend = any(re.match(r"^[S]\s*\d{1,2}", str(info)) for info in edited_df["Original Row Info"])
             on_call_status = "Yes" if has_weekend else "No"
+            
             html_content = generate_pdf_html(processed_data, final_engineer, data_packet["week_ending"], data_packet["week_number"], on_call_status)
             st.download_button(label=f"⬇️ Download PDF for {selected_file}", data=HTML(string=html_content).write_pdf(), file_name=f"{final_engineer.replace(' ', '_')}_{data_packet['week_number']}.pdf", mime="application/pdf")
 
@@ -356,8 +367,12 @@ if uploaded_files:
                         missing_weekdays_info = [d for d in expected_weekdays if d[0] not in extracted_dates]
 
                     batch_proc_data = process_timesheet_data(d_pack["df"], d_pack["dt_obj"], missing_weekdays_info, d_pack["missing_selections"], contract_hours)
-                    has_wknd = any(re.match(r"^[S]\s*\d{1,2}", str(info)) for info in d_pack["df"]["Original Row Info"])
+                    
+                    has_wknd = False
+                    if not d_pack["df"].empty:
+                        has_wknd = any(re.match(r"^[S]\s*\d{1,2}", str(info)) for info in d_pack["df"]["Original Row Info"])
                     oc_status = "Yes" if has_wknd else "No"
+                    
                     b_html = generate_pdf_html(batch_proc_data, final_engineer, d_pack["week_ending"], d_pack["week_number"], oc_status)
                     pdf_bytes = HTML(string=b_html).write_pdf()
                     zip_file.writestr(f"{final_engineer.replace(' ', '_')}_Wk_{d_pack['week_number']}.pdf", pdf_bytes)
@@ -372,112 +387,114 @@ if uploaded_files:
         f1, f2 = st.columns([1, 2])
         with f1: filter_type = st.radio("Time Period", ["All Time", "By Month", "By Week"])
         with f2:
-            if filter_type == "By Month":
+            if filter_type == "By Month" and not df_master.empty:
                 available_months = df_master["Month"].unique()
                 sel_filter = st.selectbox("Select Month", available_months)
                 df_filtered = df_master[df_master["Month"] == sel_filter]
-            elif filter_type == "By Week":
+            elif filter_type == "By Week" and not df_master.empty:
                 available_weeks = df_master["Week End"].unique()
                 sel_filter = st.selectbox("Select Week Ending", available_weeks)
                 df_filtered = df_master[df_master["Week End"] == sel_filter]
             else:
                 df_filtered = df_master
 
-        # --- AVERAGES & KPIs ---
-        st.markdown("---")
-        st.markdown("### 📈 Averages & Key Metrics")
-        m1, m2, m3, m4 = st.columns(4)
-        
-        total_work_global = df_filtered['work'].sum()
-        total_travel_global = df_filtered['travel'].sum()
-        total_overall_global = total_work_global + total_travel_global
-        
-        unique_weeks = df_filtered['Week End'].nunique()
-        unique_months = df_filtered['Month'].nunique()
-        unique_days = df_filtered.groupby(['Week End', 'date']).ngroups
-        
-        avg_hrs_week = total_overall_global / unique_weeks if unique_weeks > 0 else 0
-        avg_hrs_month = total_overall_global / unique_months if unique_months > 0 else 0
-        avg_travel_day = total_travel_global / unique_days if unique_days > 0 else 0
-        avg_work_day = total_work_global / unique_days if unique_days > 0 else 0
-        
-        m1.metric("Avg Hours per Week", f"{avg_hrs_week:.2f} hrs")
-        m2.metric("Avg Hours per Month", f"{avg_hrs_month:.2f} hrs")
-        m3.metric("Avg Travel per Day", f"{avg_travel_day:.2f} hrs")
-        m4.metric("Avg On-Site per Day", f"{avg_work_day:.2f} hrs")
+        if df_filtered.empty:
+            st.warning("No data available for the selected period.")
+        else:
+            # --- AVERAGES & KPIs ---
+            st.markdown("---")
+            st.markdown("### 📈 Averages & Key Metrics")
+            m1, m2, m3, m4 = st.columns(4)
+            
+            total_work_global = df_filtered['work'].sum()
+            total_travel_global = df_filtered['travel'].sum()
+            total_overall_global = total_work_global + total_travel_global
+            
+            unique_weeks = df_filtered['Week End'].nunique()
+            unique_months = df_filtered['Month'].nunique()
+            unique_days = df_filtered.groupby(['Week End', 'date']).ngroups
+            
+            avg_hrs_week = total_overall_global / unique_weeks if unique_weeks > 0 else 0
+            avg_hrs_month = total_overall_global / unique_months if unique_months > 0 else 0
+            avg_travel_day = total_travel_global / unique_days if unique_days > 0 else 0
+            avg_work_day = total_work_global / unique_days if unique_days > 0 else 0
+            
+            m1.metric("Avg Hours per Week", f"{avg_hrs_week:.2f} hrs")
+            m2.metric("Avg Hours per Month", f"{avg_hrs_month:.2f} hrs")
+            m3.metric("Avg Travel per Day", f"{avg_travel_day:.2f} hrs")
+            m4.metric("Avg On-Site per Day", f"{avg_work_day:.2f} hrs")
 
 
-        # --- WEEK-ISOLATED PAY CALCULATOR ---
-        st.markdown("---")
-        st.markdown("### 💰 Master Pay Calculator")
-        p1, p2 = st.columns(2)
-        def update_rate(): st.session_state.saved_rate = st.session_state.rate_input
-        with p1: rate = st.number_input("Global Hourly Rate (£)", value=st.session_state.saved_rate, step=0.50, format="%.2f", key="rate_input", on_change=update_rate)
-        
-        all_dt_strs = df_filtered["Week End"].unique()
-        bh_options = []
-        for we_str in all_dt_strs:
-            try:
-                dt_obj = datetime.strptime(we_str, "%d %b %Y")
-                for i in range(7):
-                    curr = dt_obj - timedelta(days=6-i)
-                    bh_options.append(f"{curr.strftime('%A')} {curr.day} ({we_str})")
-            except: pass
-        
-        with p2: bank_holidays_raw = st.multiselect("Select Bank Holidays in Filtered Range (Pays 2x):", options=list(set(bh_options)))
-        bank_holidays = [b.split(" ")[1] for b in bank_holidays_raw]
-
-        total_base_hrs, total_ot_hrs, total_dt_hrs = 0.0, 0.0, 0.0
-
-        # Math logic iterates PER WEEK to ensure 1.5x threshold resets correctly!
-        for week_str, week_group in df_filtered.groupby("Week End"):
-            week_std_hrs, week_dt_hrs = 0.0, 0.0
-            for _, row in week_group.iterrows():
-                day_total = float(row['work']) + float(row['travel'])
-                is_double_time = False
-                
-                if str(row['date']) in bank_holidays: is_double_time = True
-                
+            # --- WEEK-ISOLATED PAY CALCULATOR ---
+            st.markdown("---")
+            st.markdown("### 💰 Master Pay Calculator")
+            p1, p2 = st.columns(2)
+            def update_rate(): st.session_state.saved_rate = st.session_state.rate_input
+            with p1: rate = st.number_input("Global Hourly Rate (£)", value=st.session_state.saved_rate, step=0.50, format="%.2f", key="rate_input", on_change=update_rate)
+            
+            all_dt_strs = df_filtered["Week End"].unique()
+            bh_options = []
+            for we_str in all_dt_strs:
                 try:
-                    dt_obj = datetime.strptime(row['Week End'], "%d %b %Y")
+                    dt_obj = datetime.strptime(we_str, "%d %b %Y")
                     for i in range(7):
                         curr = dt_obj - timedelta(days=6-i)
-                        if str(curr.day) == str(row['date']) and curr.weekday() == 6: is_double_time = True
+                        bh_options.append(f"{curr.strftime('%A')} {curr.day} ({we_str})")
                 except: pass
-                
-                if is_double_time: week_dt_hrs += day_total
-                else: week_std_hrs += day_total
-
-            week_base = min(week_std_hrs, st.session_state.saved_contract)
-            week_ot = max(0, week_std_hrs - st.session_state.saved_contract)
             
-            total_base_hrs += week_base
-            total_ot_hrs += week_ot
-            total_dt_hrs += week_dt_hrs
+            with p2: bank_holidays_raw = st.multiselect("Select Bank Holidays in Filtered Range (Pays 2x):", options=list(set(bh_options)))
+            bank_holidays = [b.split(" ")[1] for b in bank_holidays_raw]
 
-        total_pay = (total_base_hrs * rate) + (total_ot_hrs * (rate * 1.5)) + (total_dt_hrs * (rate * 2.0))
+            total_base_hrs, total_ot_hrs, total_dt_hrs = 0.0, 0.0, 0.0
 
-        st.markdown(f"**Total Standard:** {total_base_hrs:.2f} hrs | **Total Overtime 1.5x:** {total_ot_hrs:.2f} hrs | **Total Sunday/BH 2x:** {total_dt_hrs:.2f} hrs")
-        st.success(f"### Master Estimated Gross Pay: £{total_pay:.2f}")
+            for week_str, week_group in df_filtered.groupby("Week End"):
+                week_std_hrs, week_dt_hrs = 0.0, 0.0
+                for _, row in week_group.iterrows():
+                    day_total = float(row['work']) + float(row['travel'])
+                    is_double_time = False
+                    
+                    if str(row['date']) in bank_holidays: is_double_time = True
+                    
+                    try:
+                        dt_obj = datetime.strptime(row['Week End'], "%d %b %Y")
+                        for i in range(7):
+                            curr = dt_obj - timedelta(days=6-i)
+                            if str(curr.day) == str(row['date']) and curr.weekday() == 6: is_double_time = True
+                    except: pass
+                    
+                    if is_double_time: week_dt_hrs += day_total
+                    else: week_std_hrs += day_total
 
-        # --- VISUAL CHARTS ---
-        st.markdown("---")
-        c1, c2 = st.columns(2)
-        with c1:
-            if total_work_global + total_travel_global > 0:
-                pie_overall = pd.DataFrame({"Category": ["On-Site Work", "Travel Time"], "Hours": [total_work_global, total_travel_global]})
-                fig1 = px.pie(pie_overall, values='Hours', names='Category', hole=0.4, title="Overall Time: Work vs Travel", color_discrete_sequence=['#2e7b32', '#1976d2'])
-                fig1.update_traces(textposition='inside', textinfo='percent+label')
-                st.plotly_chart(fig1, use_container_width=True)
+                week_base = min(week_std_hrs, st.session_state.saved_contract)
+                week_ot = max(0, week_std_hrs - st.session_state.saved_contract)
+                
+                total_base_hrs += week_base
+                total_ot_hrs += week_ot
+                total_dt_hrs += week_dt_hrs
 
-        with c2:
-            prod_hours = df_filtered[df_filtered['productivity'] == 'Productive Work']['work'].sum()
-            non_prod_hours = df_filtered[df_filtered['productivity'] == 'Non-Productive Work']['work'].sum()
-            if prod_hours + non_prod_hours > 0:
-                pie_prod = pd.DataFrame({"Category": ["Productive Work", "Non-Productive Work"], "Hours": [prod_hours, non_prod_hours]})
-                fig2 = px.pie(pie_prod, values='Hours', names='Category', hole=0.4, title="Productivity Split (On-Site Hours)", color_discrete_sequence=['#ff9800', '#757575'])
-                fig2.update_traces(textposition='inside', textinfo='percent+label')
-                st.plotly_chart(fig2, use_container_width=True)
+            total_pay = (total_base_hrs * rate) + (total_ot_hrs * (rate * 1.5)) + (total_dt_hrs * (rate * 2.0))
+
+            st.markdown(f"**Total Standard:** {total_base_hrs:.2f} hrs | **Total Overtime 1.5x:** {total_ot_hrs:.2f} hrs | **Total Sunday/BH 2x:** {total_dt_hrs:.2f} hrs")
+            st.success(f"### Master Estimated Gross Pay: £{total_pay:.2f}")
+
+            # --- VISUAL CHARTS ---
+            st.markdown("---")
+            c1, c2 = st.columns(2)
+            with c1:
+                if total_work_global + total_travel_global > 0:
+                    pie_overall = pd.DataFrame({"Category": ["On-Site Work", "Travel Time"], "Hours": [total_work_global, total_travel_global]})
+                    fig1 = px.pie(pie_overall, values='Hours', names='Category', hole=0.4, title="Overall Time: Work vs Travel", color_discrete_sequence=['#2e7b32', '#1976d2'])
+                    fig1.update_traces(textposition='inside', textinfo='percent+label')
+                    st.plotly_chart(fig1, use_container_width=True)
+
+            with c2:
+                prod_hours = df_filtered[df_filtered['productivity'] == 'Productive Work']['work'].sum()
+                non_prod_hours = df_filtered[df_filtered['productivity'] == 'Non-Productive Work']['work'].sum()
+                if prod_hours + non_prod_hours > 0:
+                    pie_prod = pd.DataFrame({"Category": ["Productive Work", "Non-Productive Work"], "Hours": [prod_hours, non_prod_hours]})
+                    fig2 = px.pie(pie_prod, values='Hours', names='Category', hole=0.4, title="Productivity Split (On-Site Hours)", color_discrete_sequence=['#ff9800', '#757575'])
+                    fig2.update_traces(textposition='inside', textinfo='percent+label')
+                    st.plotly_chart(fig2, use_container_width=True)
 
     if debug_mode:
         st.markdown("---")
