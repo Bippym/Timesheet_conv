@@ -12,6 +12,29 @@ st.markdown("Upload your work-style PDF. The app will extract the data, apply yo
 
 debug_mode = st.checkbox("Debug Mode: Show Raw PDF Text")
 
+def fix_time_string(current_time, previous_time):
+    if not current_time or not previous_time or current_time == "" or previous_time == "": 
+        return current_time
+    try:
+        # Pad with zero for parsing if needed
+        pt_str = "0" + previous_time if len(previous_time.split(":")[0]) == 1 else previous_time
+        ct_str = "0" + current_time if len(current_time.split(":")[0]) == 1 else current_time
+        
+        pt = datetime.strptime(pt_str, "%H:%M")
+        ct = datetime.strptime(ct_str, "%H:%M")
+        
+        # If time goes backward and the hour is < 10, the OCR dropped the "1" (e.g., 4:15 instead of 14:15)
+        if ct < pt and ct.hour < 10:
+            new_hour = ct.hour + 10
+            if new_hour < 24:
+                new_ct = ct.replace(hour=new_hour)
+                if new_ct >= pt:
+                    # Strip leading zero for clean display
+                    return new_ct.strftime("%H:%M").lstrip("0") if new_ct.hour < 10 else new_ct.strftime("%H:%M")
+    except: 
+        pass
+    return current_time
+
 def calc_hours(start_str, end_str):
     if not start_str or not end_str or pd.isna(start_str) or pd.isna(end_str): return 0.0
     start_str, end_str = str(start_str).strip(), str(end_str).strip()
@@ -22,12 +45,7 @@ def calc_hours(start_str, end_str):
         if len(end_str.split(":")[0]) == 1: end_str = "0" + end_str
         tdelta = datetime.strptime(end_str, fmt) - datetime.strptime(start_str, fmt)
         
-        if tdelta.days < 0:
-            hrs = (timedelta(days=1) + tdelta).total_seconds() / 3600
-            if hrs > 10: 
-                return round(hrs - 14, 2) 
-            return round(hrs, 2)
-            
+        if tdelta.days < 0: tdelta = timedelta(days=0, seconds=tdelta.seconds, microseconds=tdelta.microseconds)
         return round(tdelta.total_seconds() / 3600, 2)
     except: return 0.0
 
@@ -75,9 +93,6 @@ if uploaded_file is not None:
                         site_clean = re.sub(r"\s+\d+$", "", site_clean).strip() 
                         site_clean = re.sub(r"\s+\d+\.\d+$", "", site_clean).strip() 
                         site_clean = re.sub(r"\s+[A-Z0-9\s]{1,10}SC$", "", site_clean).strip() 
-                        
-                        # --- LOWERCASE NOTE ERADICATOR ---
-                        # Instantly deletes typed notes appended to the end of site names
                         site_clean = re.sub(r"\s+[a-z].*", "", site_clean).strip()
                         
                         times = []
@@ -135,6 +150,22 @@ if uploaded_file is not None:
             for index, row in edited_df.iterrows():
                 date_num, site, arrived, left, began = str(row["Date Num"]), str(row["Site & Ref No."]), str(row["Arrived On Site"]), str(row["Left Site"]), str(row["Began Journey"])
                 
+                # Apply Strict Continuity Auto-Snap to close human-error gaps
+                if len(processed_data) > 0:
+                    prev_left = processed_data[-1]["left"]
+                    prev_date = processed_data[-1]["date"]
+                    
+                    if date_num == prev_date and prev_left != "" and pending_break_mins == 0:
+                        if began == "": began = prev_left
+                        
+                # Smart Time String Fixer (Restores dropped 1s)
+                if len(processed_data) > 0:
+                    prev_left_time = processed_data[-1]["left"]
+                    began = fix_time_string(began, prev_left_time)
+                arrived = fix_time_string(arrived, began)
+                left = fix_time_string(left, arrived)
+                
+                # Handle Breaks
                 if "BREAK" in site.upper():
                     b_mins = round(calc_hours(arrived, left) * 60)
                     if b_mins == 0: b_mins = round(calc_hours(began, left) * 60) 
@@ -143,15 +174,7 @@ if uploaded_file is not None:
                     pending_break_mins += b_mins
                     continue 
 
-                # --- STRICT CONTINUITY AUTO-SNAP ---
-                if len(processed_data) > 0:
-                    prev_left = processed_data[-1]["left"]
-                    prev_date = processed_data[-1]["date"]
-                    
-                    # Overwrite start time to match previous end time if on the same day and no break occurred
-                    if date_num == prev_date and prev_left != "" and pending_break_mins == 0:
-                        began = prev_left
-
+                # Failsafe Continuity Check
                 if (began == "" or pending_break_mins > 0) and len(processed_data) > 0: 
                     began = processed_data[-1]["left"]
                     
@@ -188,7 +211,7 @@ if uploaded_file is not None:
                 th, td {{ border: 1px solid #000; padding: 4px; text-align: center; }}
                 th {{ background-color: #f2f2f2; font-size: 7pt; height: 35px; }}
                 .day-row {{ background-color: #ddd; font-weight: bold; text-align: left; padding-left: 10px; }}
-                .total-row {{ font-weight: bold; background-color: #f9f9f9; }}
+                .total-row td {{ background-color: #eef2f5; font-weight: bold; border-top: 1.5px solid #000; }}
             </style>
             </head>
             <body>
@@ -225,7 +248,16 @@ if uploaded_file is not None:
                     row_total = row['work'] + row['travel']
                     html_content += f"<tr><td>{row['site']}</td><td></td><td></td><td>{row['began']}</td><td>{row['arrived']}</td><td>{row['left']}</td><td>{row['work']:.2f}</td><td>{row['rest_break']}</td><td>{row['travel']:.2f}</td><td>{row_total:.2f}</td></tr>"
                     day_total += row_total
+                    
                 grand_total += day_total
+                
+                # ADDED: Daily Total Row
+                html_content += f"""
+                <tr class="total-row">
+                    <td colspan="9" style="text-align: right;"><strong>Daily Total:</strong></td>
+                    <td><strong>{day_total:.2f}</strong></td>
+                </tr>
+                """
             
             html_content += f"</tbody></table><div style='margin-top: 20px; font-weight: bold; text-align: right; border-top: 1px solid #000; padding-top: 5px;'>Weekly Total Hours: {grand_total:.2f}</div></body></html>"
             
