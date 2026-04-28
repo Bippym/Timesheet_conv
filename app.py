@@ -172,16 +172,11 @@ def generate_pdf_html(df_processed, engineer, week_end_date, week_number, on_cal
 # --- MULTI-FILE EXTRACTION ROUTINE ---
 uploaded_files = st.file_uploader("Upload Work-Style Timesheets (PDF)", type=["pdf"], accept_multiple_files=True, key=f"uploader_{st.session_state.uploader_key}")
 
-c1, c2 = st.columns(2)
-def update_eng(): st.session_state.saved_engineer = st.session_state.eng_input
-def update_con(): st.session_state.saved_contract = st.session_state.con_input
-with c1: final_engineer = st.text_input("Engineer Name (Global)", value=st.session_state.saved_engineer, key="eng_input", on_change=update_eng)
-with c2: contract_hours = st.selectbox("Contracted Hours", options=[40, 45], index=0 if st.session_state.saved_contract == 40 else 1, key="con_input", on_change=update_con)
-
 datasets = {}
 master_analytics_data = []
 
 if uploaded_files:
+    # 1. EXTRACT DATA FIRST
     with st.spinner("Processing all uploaded timesheets..."):
         for uploaded_file in uploaded_files:
             extracted_data = []
@@ -247,7 +242,15 @@ if uploaded_files:
                 "dt_obj": dt_obj, "df": pd.DataFrame(extracted_data, columns=df_cols), "raw_text": raw_text_dump, "missing_selections": {}
             }
 
-    # --- THE BLANK TIMESHEET INTERCEPTOR & DATE TRIANGULATION ---
+    # 2. RENDER GLOBAL UI (Now populated with the name!)
+    st.markdown("### ⚙️ Global File Settings")
+    c1, c2 = st.columns(2)
+    def update_eng(): st.session_state.saved_engineer = st.session_state.eng_input
+    def update_con(): st.session_state.saved_contract = st.session_state.con_input
+    with c1: final_engineer = st.text_input("Engineer Name (Global)", value=st.session_state.saved_engineer, key="eng_input", on_change=update_eng)
+    with c2: contract_hours = st.selectbox("Contracted Hours", options=[40, 45], index=0 if st.session_state.saved_contract == 40 else 1, key="con_input", on_change=update_con)
+
+    # 3. THE BLANK TIMESHEET INTERCEPTOR & DATE TRIANGULATION
     st.markdown("---")
     st.markdown("### ⚠️ Global Timesheet Resolution")
     any_missing = False
@@ -275,10 +278,10 @@ if uploaded_files:
                     wk_diff = int(guessed_wk) - ref_wk
                     guessed_we = (ref_dt + timedelta(weeks=wk_diff)).strftime("%d %b %Y")
 
-            c1, c2, c3 = st.columns(3)
-            with c1: manual_we = st.text_input("Week End Date (e.g. 26 Apr 2026)", value=guessed_we, key=f"we_{file_name}")
-            with c2: manual_wk = st.text_input("Week Number", value=guessed_wk, key=f"wk_{file_name}")
-            with c3: full_week_reason = st.selectbox("Reason for Full Week Absence", ["Ignore", "Annual Leave", "Sick", "Unpaid Leave"], key=f"rsn_{file_name}")
+            m1, m2, m3 = st.columns(3)
+            with m1: manual_we = st.text_input("Week End Date (e.g. 26 Apr 2026)", value=guessed_we, key=f"we_{file_name}")
+            with m2: manual_wk = st.text_input("Week Number", value=guessed_wk, key=f"wk_{file_name}")
+            with m3: full_week_reason = st.selectbox("Reason for Full Week Absence", ["Ignore", "Annual Leave", "Sick", "Unpaid Leave"], key=f"rsn_{file_name}")
             
             datasets[file_name]["week_ending"] = manual_we
             datasets[file_name]["week_number"] = manual_wk
@@ -307,7 +310,7 @@ if uploaded_files:
                 
     if not any_missing: st.success("No missing weekdays detected across all uploaded files. Ready to generate!")
 
-    # Compile Master Analytics Data
+    # 4. Compile Master Analytics Data
     for file_name, d_packet in datasets.items():
         missing_weekdays_info = []
         if d_packet["dt_obj"]:
@@ -398,45 +401,48 @@ with tab2:
                 df_filtered = df_master[df_master["Week End"] == sel_filter]
             else: df_filtered = df_master
 
-        st.markdown("---")
-        st.markdown("### 📈 Averages & Key Metrics")
-        m1, m2, m3, m4 = st.columns(4)
-        
-        total_work_global = df_filtered['work'].sum()
-        total_travel_global = df_filtered['travel'].sum()
-        total_overall_global = total_work_global + total_travel_global
-        
-        unique_weeks = df_filtered['Week End'].nunique()
-        unique_months = df_filtered['Month'].nunique()
-        unique_days = df_filtered.groupby(['Week End', 'date']).ngroups
-        
-        avg_hrs_week = total_overall_global / unique_weeks if unique_weeks > 0 else 0
-        avg_hrs_month = total_overall_global / unique_months if unique_months > 0 else 0
-        avg_travel_day = total_travel_global / unique_days if unique_days > 0 else 0
-        avg_work_day = total_work_global / unique_days if unique_days > 0 else 0
-        
-        m1.metric("Avg Hours per Week", f"{avg_hrs_week:.2f} hrs")
-        m2.metric("Avg Hours per Month", f"{avg_hrs_month:.2f} hrs")
-        m3.metric("Avg Travel per Day", f"{avg_travel_day:.2f} hrs")
-        m4.metric("Avg On-Site per Day", f"{avg_work_day:.2f} hrs")
+        if df_filtered.empty:
+            st.warning("No data available for the selected period.")
+        else:
+            st.markdown("---")
+            st.markdown("### 📈 Averages & Key Metrics")
+            m1, m2, m3, m4 = st.columns(4)
+            
+            total_work_global = df_filtered['work'].sum()
+            total_travel_global = df_filtered['travel'].sum()
+            total_overall_global = total_work_global + total_travel_global
+            
+            unique_weeks = df_filtered['Week End'].nunique()
+            unique_months = df_filtered['Month'].nunique()
+            unique_days = df_filtered.groupby(['Week End', 'date']).ngroups
+            
+            avg_hrs_week = total_overall_global / unique_weeks if unique_weeks > 0 else 0
+            avg_hrs_month = total_overall_global / unique_months if unique_months > 0 else 0
+            avg_travel_day = total_travel_global / unique_days if unique_days > 0 else 0
+            avg_work_day = total_work_global / unique_days if unique_days > 0 else 0
+            
+            m1.metric("Avg Hours per Week", f"{avg_hrs_week:.2f} hrs")
+            m2.metric("Avg Hours per Month", f"{avg_hrs_month:.2f} hrs")
+            m3.metric("Avg Travel per Day", f"{avg_travel_day:.2f} hrs")
+            m4.metric("Avg On-Site per Day", f"{avg_work_day:.2f} hrs")
 
-        st.markdown("---")
-        c1, c2 = st.columns(2)
-        with c1:
-            if total_overall_global > 0:
-                pie_overall = pd.DataFrame({"Category": ["On-Site Work", "Travel Time"], "Hours": [total_work_global, total_travel_global]})
-                fig1 = px.pie(pie_overall, values='Hours', names='Category', hole=0.4, title="Overall Time: Work vs Travel", color_discrete_sequence=['#2e7b32', '#1976d2'])
-                fig1.update_traces(textposition='inside', textinfo='percent+label')
-                st.plotly_chart(fig1, use_container_width=True)
+            st.markdown("---")
+            c1, c2 = st.columns(2)
+            with c1:
+                if total_overall_global > 0:
+                    pie_overall = pd.DataFrame({"Category": ["On-Site Work", "Travel Time"], "Hours": [total_work_global, total_travel_global]})
+                    fig1 = px.pie(pie_overall, values='Hours', names='Category', hole=0.4, title="Overall Time: Work vs Travel", color_discrete_sequence=['#2e7b32', '#1976d2'])
+                    fig1.update_traces(textposition='inside', textinfo='percent+label')
+                    st.plotly_chart(fig1, use_container_width=True)
 
-        with c2:
-            prod_hours = df_filtered[df_filtered['productivity'] == 'Productive Work']['work'].sum()
-            non_prod_hours = df_filtered[df_filtered['productivity'] == 'Non-Productive Work']['work'].sum()
-            if prod_hours + non_prod_hours > 0:
-                pie_prod = pd.DataFrame({"Category": ["Productive Work", "Non-Productive Work"], "Hours": [prod_hours, non_prod_hours]})
-                fig2 = px.pie(pie_prod, values='Hours', names='Category', hole=0.4, title="Productivity Split (On-Site Hours)", color_discrete_sequence=['#ff9800', '#757575'])
-                fig2.update_traces(textposition='inside', textinfo='percent+label')
-                st.plotly_chart(fig2, use_container_width=True)
+            with c2:
+                prod_hours = df_filtered[df_filtered['productivity'] == 'Productive Work']['work'].sum()
+                non_prod_hours = df_filtered[df_filtered['productivity'] == 'Non-Productive Work']['work'].sum()
+                if prod_hours + non_prod_hours > 0:
+                    pie_prod = pd.DataFrame({"Category": ["Productive Work", "Non-Productive Work"], "Hours": [prod_hours, non_prod_hours]})
+                    fig2 = px.pie(pie_prod, values='Hours', names='Category', hole=0.4, title="Productivity Split (On-Site Hours)", color_discrete_sequence=['#ff9800', '#757575'])
+                    fig2.update_traces(textposition='inside', textinfo='percent+label')
+                    st.plotly_chart(fig2, use_container_width=True)
 
 # --- TAB 3: SALARY & ARREARS ---
 with tab3:
@@ -447,7 +453,7 @@ with tab3:
     def update_rate_tab3(): st.session_state.saved_rate = st.session_state.rate_input_tab3
     with p1: rate = st.number_input("Global Hourly Rate (£)", value=st.session_state.saved_rate, step=0.50, format="%.2f", key="rate_input_tab3", on_change=update_rate_tab3)
     
-    annual_basic = rate * contract_hours * 52
+    annual_basic = rate * st.session_state.saved_contract * 52
     monthly_basic = annual_basic / 12
     
     st.markdown(f"**Annual Basic Pay:** £{annual_basic:,.2f} | **Monthly Basic Pay:** £{monthly_basic:,.2f}")
@@ -491,10 +497,9 @@ with tab3:
                     if "ANNUAL LEAVE" in s_upper or "SICK" in s_upper or "UNPAID LEAVE" in s_upper:
                         leave_days.append(f"{row['date']} ({row['site']})")
 
-                week_base = min(week_std_hrs, contract_hours)
-                week_ot = max(0, week_std_hrs - contract_hours)
+                week_base = min(week_std_hrs, st.session_state.saved_contract)
+                week_ot = max(0, week_std_hrs - st.session_state.saved_contract)
                 
-                # Push permanently into Database
                 st.session_state.user_db["weeks"][week_str] = {
                     "Week No": str(week_group["Week No"].iloc[0]),
                     "Standard": week_base,
@@ -504,7 +509,7 @@ with tab3:
                 }
             st.success("Uploaded timesheets processed and saved to your Personal Database!")
 
-    # Build Ledger from User Database (Not just current PDFs)
+    # Build Ledger from User Database
     if not st.session_state.user_db["weeks"]:
         st.warning("Your database is empty. Upload timesheets and push them to the database, or load a previous database file in Tab 4.")
     else:
@@ -579,15 +584,17 @@ with tab4:
     db_file = st.file_uploader("📂 Load Existing Database (.json)", type=["json"])
     if db_file is not None and st.session_state.last_uploaded_db != db_file.name:
         try:
-            data = json.load(db_file)
+            # Safer JSON loading method for Streamlit file uploads
+            data = json.loads(db_file.getvalue().decode("utf-8"))
             st.session_state.saved_engineer = data.get("name", st.session_state.saved_engineer)
-            st.session_state.saved_rate = data.get("rate", st.session_state.saved_rate)
-            st.session_state.saved_contract = data.get("contract", st.session_state.saved_contract)
+            st.session_state.saved_rate = float(data.get("rate", st.session_state.saved_rate))
+            st.session_state.saved_contract = int(data.get("contract", st.session_state.saved_contract))
             st.session_state.user_db["weeks"] = data.get("weeks", {})
             st.session_state.last_uploaded_db = db_file.name
             st.success("Database loaded successfully!")
             st.rerun()
-        except: st.error("Invalid database file. Make sure it is a previously exported .json file.")
+        except Exception as e:
+            st.error(f"Invalid database file. Make sure it is a previously exported .json file. Error: {e}")
 
     st.markdown("---")
     st.markdown("#### Edit Historical Records")
@@ -597,7 +604,6 @@ with tab4:
         db_df.reset_index(inplace=True)
         db_df.rename(columns={"index": "Week End Date"}, inplace=True)
         
-        # Display the interactive editor
         edited_db = st.data_editor(db_df, num_rows="dynamic", use_container_width=True)
         
         if st.button("💾 Save Edits to Memory"):
