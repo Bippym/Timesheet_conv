@@ -14,16 +14,14 @@ st.set_page_config(page_title="Network Timesheet Dashboard", layout="wide")
 if "saved_contract" not in st.session_state: st.session_state.saved_contract = 40
 if "saved_rate" not in st.session_state: st.session_state.saved_rate = 0.00
 if "saved_engineer" not in st.session_state: st.session_state.saved_engineer = "UNKNOWN ENGINEER"
-if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0 # Cache buster for the delete button
+if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0 
 
 # --- SIDEBAR & DELETE FUNCTION ---
 with st.sidebar:
     st.header("⚙️ Advanced Settings")
-    
     if st.button("🗑️ Delete All Loaded Timesheets", type="primary"):
         st.session_state.uploader_key += 1
         st.rerun()
-        
     st.markdown("---")
     debug_mode = st.checkbox("Enable Developer Debug Mode")
 
@@ -70,17 +68,13 @@ def get_productivity_category(site_name):
 def process_timesheet_data(df, end_date_obj=None, missing_weekdays=None, missing_selections=None, contract_hours=40):
     processed_data = []
     pending_break_mins = 0
-    
     if not df.empty:
         for index, row in df.iterrows():
             date_num, site, arrived, left, began = str(row["Date Num"]), str(row["Site & Ref No."]), str(row["Arrived On Site"]), str(row["Left Site"]), str(row["Began Journey"])
             is_break = "BREAK" in site.upper()
-            
             if not is_break and len(processed_data) > 0:
-                prev_left = processed_data[-1]["left"]
-                prev_date = processed_data[-1]["date"]
+                prev_left, prev_date = processed_data[-1]["left"], processed_data[-1]["date"]
                 if date_num == prev_date and prev_left != "" and pending_break_mins == 0: began = prev_left
-                    
             if len(processed_data) > 0: began = fix_time_string(began, processed_data[-1]["left"])
             arrived = fix_time_string(arrived, began)
             left = fix_time_string(left, arrived)
@@ -93,8 +87,7 @@ def process_timesheet_data(df, end_date_obj=None, missing_weekdays=None, missing
                 continue 
 
             if began == "" and len(processed_data) > 0:
-                if date_num == processed_data[-1]["date"]:
-                    began = processed_data[-1]["left"]
+                if date_num == processed_data[-1]["date"]: began = processed_data[-1]["left"]
                 
             travel_time, work_time = calc_hours(began, arrived), calc_hours(arrived, left)
             rest_break_display = ""
@@ -104,11 +97,7 @@ def process_timesheet_data(df, end_date_obj=None, missing_weekdays=None, missing
                 pending_break_mins = 0 
                 
             prod_cat = "Ignored" if ("HOME" in site.upper() or "BREAK" in site.upper() or work_time == 0) else get_productivity_category(site)
-            
-            processed_data.append({
-                "date": date_num, "site": site, "began": began, "arrived": arrived, "left": left, 
-                "work": work_time, "travel": travel_time, "rest_break": rest_break_display, "productivity": prod_cat
-            })
+            processed_data.append({"date": date_num, "site": site, "began": began, "arrived": arrived, "left": left, "work": work_time, "travel": travel_time, "rest_break": rest_break_display, "productivity": prod_cat})
         
     if missing_weekdays and missing_selections:
         daily_hrs = contract_hours / 5.0
@@ -116,10 +105,7 @@ def process_timesheet_data(df, end_date_obj=None, missing_weekdays=None, missing
             reason = missing_selections.get(d_num, "Ignore")
             if reason != "Ignore":
                 hrs = daily_hrs if reason == "Annual Leave" else 0.0
-                processed_data.append({
-                    "date": d_num, "site": reason.upper(), "began": "", "arrived": "", "left": "", 
-                    "work": hrs, "travel": 0.0, "rest_break": "", "productivity": "Non-Productive Work"
-                })
+                processed_data.append({"date": d_num, "site": reason.upper(), "began": "", "arrived": "", "left": "", "work": hrs, "travel": 0.0, "rest_break": "", "productivity": "Non-Productive Work"})
                 
     if end_date_obj:
         def get_sort_date(d_num):
@@ -128,28 +114,20 @@ def process_timesheet_data(df, end_date_obj=None, missing_weekdays=None, missing
                 if str(curr.day) == str(d_num): return curr
             return end_date_obj
         processed_data.sort(key=lambda x: get_sort_date(x["date"]))
-        
     return processed_data
 
 def generate_pdf_html(df_processed, engineer, week_end_date, week_number, on_call):
     html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-    <style>
+    <!DOCTYPE html><html><head><style>
         body {{ font-family: Arial, sans-serif; font-size: 8pt; margin: 0; padding: 20px; }}
         .header {{ display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 15px; border-bottom: 1.5px solid #000; padding-bottom: 10px; }}
-        .header div {{ flex: 1; }}
-        .header-center {{ text-align: center; }}
-        .header-right {{ text-align: right; }}
+        .header div {{ flex: 1; }} .header-center {{ text-align: center; }} .header-right {{ text-align: right; }}
         table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
         th, td {{ border: 1px solid #000; padding: 4px; text-align: center; }}
         th {{ background-color: #f2f2f2; font-size: 7pt; height: 35px; }}
         .day-row {{ background-color: #ddd; font-weight: bold; text-align: left; padding-left: 10px; }}
         .total-row td {{ background-color: #eef2f5; font-weight: bold; border-top: 1.5px solid #000; }}
-    </style>
-    </head>
-    <body>
+    </style></head><body>
         <div class="header">
             <div class="header-left"><strong>Engineer:</strong> {engineer}<br><strong>Network (Catering Engineers) Ltd</strong></div>
             <div class="header-center"><strong>Week End Date:</strong> {week_end_date}<br><strong>Week:</strong> {week_number}</div>
@@ -159,7 +137,6 @@ def generate_pdf_html(df_processed, engineer, week_end_date, week_number, on_cal
             <thead><tr><th style="width: 22%;">Site & Ref No.</th><th>Multiple Jobs</th><th>Job Number</th><th>Began Journey</th><th>Arrived On Site</th><th>Left Site</th><th>Hours Worked</th><th>Rest Break (min)</th><th>Travel Time</th><th>TOTAL Hours</th></tr></thead>
             <tbody>
     """
-    
     df_proc = pd.DataFrame(df_processed)
     grand_total = 0
     if not df_proc.empty:
@@ -174,17 +151,14 @@ def generate_pdf_html(df_processed, engineer, week_end_date, week_number, on_cal
                         day_str = curr.strftime(f"%A {curr.day}{suffix} %B")
                         break
             except: day_str = f"Date: {date}"
-                
             html_content += f'<tr><td colspan="10" class="day-row">{day_str}</td></tr>'
             day_total = 0
             for _, row in group.iterrows():
                 row_total = row['work'] + row['travel']
                 html_content += f"<tr><td>{row['site']}</td><td></td><td></td><td>{row['began']}</td><td>{row['arrived']}</td><td>{row['left']}</td><td>{row['work']:.2f}</td><td>{row['rest_break']}</td><td>{row['travel']:.2f}</td><td>{row_total:.2f}</td></tr>"
                 day_total += row_total
-                
             grand_total += day_total
             html_content += f'<tr class="total-row"><td colspan="9" style="text-align: right;"><strong>Daily Total:</strong></td><td><strong>{day_total:.2f}</strong></td></tr>'
-    
     html_content += f"</tbody></table><div style='margin-top: 20px; font-weight: bold; text-align: right; border-top: 1px solid #000; padding-top: 5px;'>Weekly Total Hours: {grand_total:.2f}</div></body></html>"
     return html_content
 
@@ -211,7 +185,6 @@ if uploaded_files:
                 for page in pdf.pages:
                     text = page.extract_text()
                     if text: raw_text_dump += text + "\n\n---PAGE BREAK---\n\n"
-                    
                     if "Week Ending:" in text:
                         match = re.search(r"Week Ending:\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})", text)
                         if match: week_ending_str = match.group(1)
@@ -253,30 +226,21 @@ if uploaded_files:
                                 if "HOME" in site_clean.upper() or "BREAK" in site_clean.upper(): began, arrived, left = times[0], times[1], ""
                                 else: began, arrived, left = "", times[0], times[1]
                             else: began, arrived, left = "", times[0], ""
-                            
                             extracted_data.append({"Date Num": date_num, "Original Row Info": line, "Site & Ref No.": site_clean, "Began Journey": began, "Arrived On Site": arrived, "Left Site": left})
             
             try:
                 dt_obj = datetime.strptime(week_ending_str, "%d %b %Y")
                 month_label = dt_obj.strftime("%B %Y")
             except:
-                dt_obj = None
-                month_label = "Unknown Month"
+                dt_obj, month_label = None, "Unknown Month"
 
             df_cols = ["Date Num", "Original Row Info", "Site & Ref No.", "Began Journey", "Arrived On Site", "Left Site"]
-            df_extracted = pd.DataFrame(extracted_data, columns=df_cols)
-
             datasets[uploaded_file.name] = {
-                "week_ending": week_ending_str,
-                "week_number": week_number,
-                "month_label": month_label,
-                "dt_obj": dt_obj,
-                "df": df_extracted,
-                "raw_text": raw_text_dump,
-                "missing_selections": {}
+                "week_ending": week_ending_str, "week_number": week_number, "month_label": month_label,
+                "dt_obj": dt_obj, "df": pd.DataFrame(extracted_data, columns=df_cols), "raw_text": raw_text_dump, "missing_selections": {}
             }
 
-    # --- THE BLANK TIMESHEET INTERCEPTOR & MISSING DAYS RESOLVER ---
+    # --- THE BLANK TIMESHEET INTERCEPTOR & DATE TRIANGULATION ---
     st.markdown("---")
     st.markdown("### ⚠️ Global Timesheet Resolution")
     any_missing = False
@@ -286,26 +250,43 @@ if uploaded_files:
             any_missing = True
             st.warning(f"📄 **{file_name}** is completely blank (0 jobs logged).")
             
+            guessed_wk = d_packet["week_number"]
+            guessed_we = d_packet["week_ending"]
+            
+            # Smart Filename Parsing
+            if not guessed_wk or guessed_wk == "Unknown":
+                fm = re.search(r"[Ww](?:eek)?[_\s]*(\d{1,2})", file_name)
+                if fm: guessed_wk = fm.group(1)
+                
+            # Date Triangulation (using timedelta from a valid uploaded sheet)
+            if guessed_wk and guessed_wk.isdigit() and (not guessed_we or guessed_we == ""):
+                ref_dt, ref_wk = None, None
+                for other_pack in datasets.values():
+                    if other_pack.get("dt_obj") and str(other_pack.get("week_number")).isdigit():
+                        ref_dt = other_pack["dt_obj"]
+                        ref_wk = int(other_pack["week_number"])
+                        break
+                if ref_dt and ref_wk is not None:
+                    wk_diff = int(guessed_wk) - ref_wk
+                    guessed_we = (ref_dt + timedelta(weeks=wk_diff)).strftime("%d %b %Y")
+
             c1, c2, c3 = st.columns(3)
-            with c1: manual_we = st.text_input("Week End Date (e.g. 26 Apr 2026)", value=d_packet["week_ending"], key=f"we_{file_name}")
-            with c2: manual_wk = st.text_input("Week Number", value=d_packet["week_number"], key=f"wk_{file_name}")
+            with c1: manual_we = st.text_input("Week End Date (e.g. 26 Apr 2026)", value=guessed_we, key=f"we_{file_name}")
+            with c2: manual_wk = st.text_input("Week Number", value=guessed_wk, key=f"wk_{file_name}")
             with c3: full_week_reason = st.selectbox("Reason for Full Week Absence", ["Ignore", "Annual Leave", "Sick", "Unpaid Leave"], key=f"rsn_{file_name}")
             
             datasets[file_name]["week_ending"] = manual_we
             datasets[file_name]["week_number"] = manual_wk
-            
             try:
                 dt_obj = datetime.strptime(manual_we, "%d %b %Y")
                 datasets[file_name]["dt_obj"] = dt_obj
                 datasets[file_name]["month_label"] = dt_obj.strftime("%B %Y")
-            except ValueError:
-                datasets[file_name]["dt_obj"] = None
+            except ValueError: datasets[file_name]["dt_obj"] = None
                 
             if datasets[file_name]["dt_obj"] and full_week_reason != "Ignore":
                 for i in range(7):
                     curr = datasets[file_name]["dt_obj"] - timedelta(days=6-i)
-                    if curr.weekday() < 5: 
-                        datasets[file_name]["missing_selections"][str(curr.day)] = full_week_reason
+                    if curr.weekday() < 5: datasets[file_name]["missing_selections"][str(curr.day)] = full_week_reason
         else:
             if d_packet["dt_obj"]:
                 expected_weekdays = [(str((d_packet["dt_obj"] - timedelta(days=6-i)).day), (d_packet["dt_obj"] - timedelta(days=6-i)).strftime("%A")) for i in range(7) if (d_packet["dt_obj"] - timedelta(days=6-i)).weekday() < 5]
@@ -317,13 +298,11 @@ if uploaded_files:
                     st.warning(f"Missing days detected in: **{file_name}** (Week Ending: {d_packet['week_ending']})")
                     cols = st.columns(len(missing_weekdays))
                     for idx, (d_num, d_name) in enumerate(missing_weekdays):
-                        with cols[idx]: 
-                            datasets[file_name]["missing_selections"][d_num] = st.selectbox(f"{d_name} ({d_num})", ["Ignore", "Sick", "Annual Leave", "Unpaid Leave"], key=f"miss_{file_name}_{d_num}")
+                        with cols[idx]: datasets[file_name]["missing_selections"][d_num] = st.selectbox(f"{d_name} ({d_num})", ["Ignore", "Sick", "Annual Leave", "Unpaid Leave"], key=f"miss_{file_name}_{d_num}")
                 
-    if not any_missing:
-        st.success("No missing weekdays detected across all uploaded files. Ready to generate!")
+    if not any_missing: st.success("No missing weekdays detected across all uploaded files. Ready to generate!")
 
-    # Compile Master Analytics Data
+    # 3. Compile Master Analytics Data
     for file_name, d_packet in datasets.items():
         missing_weekdays_info = []
         if d_packet["dt_obj"]:
@@ -332,11 +311,8 @@ if uploaded_files:
             missing_weekdays_info = [d for d in expected_weekdays if d[0] not in extracted_dates]
             
         temp_processed = process_timesheet_data(d_packet["df"], d_packet["dt_obj"], missing_weekdays_info, d_packet["missing_selections"], contract_hours)
-        
         for row in temp_processed:
-            row["Week End"] = d_packet["week_ending"]
-            row["Month"] = d_packet["month_label"]
-            row["File"] = file_name
+            row["Week End"], row["Month"], row["File"] = d_packet["week_ending"], d_packet["month_label"], file_name
             master_analytics_data.append(row)
 
     df_master = pd.DataFrame(master_analytics_data)
@@ -363,14 +339,12 @@ if uploaded_files:
             processed_data = process_timesheet_data(edited_df, data_packet["dt_obj"], missing_weekdays_info, data_packet["missing_selections"], contract_hours)
             
             has_weekend = False
-            if not edited_df.empty:
-                has_weekend = any(re.match(r"^(S|SA|SAT|SU|SUN)\s*\d{1,2}", str(info).upper()) for info in edited_df["Original Row Info"])
+            if not edited_df.empty: has_weekend = any(re.match(r"^(S|SA|SAT|SU|SUN)\s*\d{1,2}", str(info).upper()) for info in edited_df["Original Row Info"])
             on_call_status = "Yes" if has_weekend else "No"
             
             html_content = generate_pdf_html(processed_data, final_engineer, data_packet["week_ending"], data_packet["week_number"], on_call_status)
             st.download_button(label=f"⬇️ Download PDF for {selected_file}", data=HTML(string=html_content).write_pdf(), file_name=f"{final_engineer.replace(' ', '_')}_{data_packet['week_number']}.pdf", mime="application/pdf")
 
-        # --- BATCH EXPORT ---
         if len(datasets) > 1:
             st.markdown("---")
             st.markdown("### 2️⃣ Batch Operations")
@@ -388,8 +362,7 @@ if uploaded_files:
                     batch_proc_data = process_timesheet_data(d_pack["df"], d_pack["dt_obj"], missing_weekdays_info, d_pack["missing_selections"], contract_hours)
                     
                     has_wknd = False
-                    if not d_pack["df"].empty:
-                        has_wknd = any(re.match(r"^(S|SA|SAT|SU|SUN)\s*\d{1,2}", str(info).upper()) for info in d_pack["df"]["Original Row Info"])
+                    if not d_pack["df"].empty: has_wknd = any(re.match(r"^(S|SA|SAT|SU|SUN)\s*\d{1,2}", str(info).upper()) for info in d_pack["df"]["Original Row Info"])
                     oc_status = "Yes" if has_wknd else "No"
                     
                     b_html = generate_pdf_html(batch_proc_data, final_engineer, d_pack["week_ending"], d_pack["week_number"], oc_status)
@@ -412,11 +385,9 @@ if uploaded_files:
                 available_weeks = df_master["Week End"].unique()
                 sel_filter = st.selectbox("Select Week Ending", available_weeks)
                 df_filtered = df_master[df_master["Week End"] == sel_filter]
-            else:
-                df_filtered = df_master
+            else: df_filtered = df_master
 
-        if df_filtered.empty:
-            st.warning("No data available for the selected period.")
+        if df_filtered.empty: st.warning("No data available for the selected period.")
         else:
             st.markdown("---")
             st.markdown("### 📈 Averages & Key Metrics")
@@ -461,7 +432,7 @@ if uploaded_files:
     # --- TAB 3: SALARY & ARREARS ---
     with tab3:
         st.markdown("### 💷 Annual Salary & Arrears Breakdown")
-        st.info("In the UK, Basic Pay is usually calculated annually and paid in 12 equal monthly installments. Overtime and Double-Time are calculated per-week, and paid a month in arrears (e.g., March's overtime is paid in April).")
+        st.info("In the UK, Basic Pay is calculated annually and paid in 12 equal monthly installments. Overtime and Double-Time are calculated per-week, and paid a month in arrears (e.g., March's overtime is paid in April).")
 
         p1, p2 = st.columns(2)
         def update_rate_tab3(): st.session_state.saved_rate = st.session_state.rate_input_tab3
@@ -491,7 +462,6 @@ if uploaded_files:
 
             # PAYROLL LEDGER ENGINE
             payroll_ledger = {}
-
             for week_str, week_group in df_master.groupby("Week End"):
                 try:
                     week_dt_obj = datetime.strptime(week_str, "%d %b %Y")
@@ -499,22 +469,16 @@ if uploaded_files:
                     worked_month_label = week_dt_obj.strftime("%B %Y")
 
                     # Shift payment month forward by 1 for arrears logic
-                    if week_dt_obj.month == 12:
-                        payment_month_dt = week_dt_obj.replace(year=week_dt_obj.year+1, month=1, day=1)
-                    else:
-                        payment_month_dt = week_dt_obj.replace(month=week_dt_obj.month+1, day=1)
+                    if week_dt_obj.month == 12: payment_month_dt = week_dt_obj.replace(year=week_dt_obj.year+1, month=1, day=1)
+                    else: payment_month_dt = week_dt_obj.replace(month=week_dt_obj.month+1, day=1)
 
                     payment_month_key = payment_month_dt.strftime("%Y-%m")
                     payment_month_label = payment_month_dt.strftime("%B %Y")
                 except: continue
 
-                # Initialize ledger keys
-                if worked_month_key not in payroll_ledger:
-                    payroll_ledger[worked_month_key] = {"label": worked_month_label, "basic_count": 0, "ot_hrs": 0.0, "dt_hrs": 0.0}
-                if payment_month_key not in payroll_ledger:
-                    payroll_ledger[payment_month_key] = {"label": payment_month_label, "basic_count": 0, "ot_hrs": 0.0, "dt_hrs": 0.0}
+                if worked_month_key not in payroll_ledger: payroll_ledger[worked_month_key] = {"label": worked_month_label, "basic_count": 0, "ot_hrs": 0.0, "dt_hrs": 0.0}
+                if payment_month_key not in payroll_ledger: payroll_ledger[payment_month_key] = {"label": payment_month_label, "basic_count": 0, "ot_hrs": 0.0, "dt_hrs": 0.0}
 
-                # Week calculation
                 week_std_hrs, week_dt_hrs = 0.0, 0.0
                 for _, row in week_group.iterrows():
                     day_total = float(row['work']) + float(row['travel'])
@@ -533,23 +497,18 @@ if uploaded_files:
 
                 week_ot = max(0, week_std_hrs - contract_hours)
 
-                # Assign active weeks to trigger Basic Pay, and push OT to the Arrears month
                 payroll_ledger[worked_month_key]["basic_count"] += 1
                 payroll_ledger[payment_month_key]["ot_hrs"] += week_ot
                 payroll_ledger[payment_month_key]["dt_hrs"] += week_dt_hrs
 
-            # Build Display Table
             payroll_data = []
             total_projected_gross = 0.0
 
             for m_key in sorted(payroll_ledger.keys()):
                 m_data = payroll_ledger[m_key]
-                
-                # If they didn't upload any timesheets for this month, Basic Pay drops to £0.00
                 basic_pay = monthly_basic if m_data["basic_count"] > 0 else 0.0
                 ot_pay = m_data["ot_hrs"] * (rate * 1.5)
                 dt_pay = m_data["dt_hrs"] * (rate * 2.0)
-                
                 gross = basic_pay + ot_pay + dt_pay
                 total_projected_gross += gross
 
@@ -564,7 +523,21 @@ if uploaded_files:
                 })
 
             st.dataframe(pd.DataFrame(payroll_data), use_container_width=True)
-            st.success(f"### Total Projected Gross Income for Processed Period: £{total_projected_gross:,.2f}")
+            
+            # --- ANNUAL EARNINGS PROJECTION ---
+            actual_weeks_uploaded = len(datasets)
+            if actual_weeks_uploaded > 0:
+                avg_weekly_gross = total_projected_gross / actual_weeks_uploaded
+                est_annual_gross = avg_weekly_gross * 52
+                
+                st.markdown("---")
+                st.markdown("### 📊 Annual Earnings Projection")
+                st.info("This projection averages the gross pay of the uploaded timesheets and extrapolates it across a full 52-week year.")
+                
+                a1, a2, a3 = st.columns(3)
+                a1.metric("Avg. Weekly Gross", f"£{avg_weekly_gross:,.2f}")
+                a2.metric("Multiplier", "x 52 Weeks")
+                a3.metric("Est. Annual Gross", f"£{est_annual_gross:,.2f}")
 
     if debug_mode:
         st.markdown("---")
