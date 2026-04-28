@@ -48,7 +48,6 @@ if uploaded_file is not None:
                     match = re.search(r"Week:\s*(\d+)", text)
                     if match: week_number = match.group(1)
                 if "Engineer:" in text:
-                    # Dynamically extract the engineer's name, ignoring titles like (MGR)
                     match = re.search(r"Engineer:\s*([A-Za-z\s]+)", text)
                     if match:
                         eng_str = match.group(1).strip()
@@ -56,10 +55,12 @@ if uploaded_file is not None:
                         if eng_str: engineer_name = eng_str
 
                 for line in text.split('\n'):
-                    times = re.findall(r'\b\d{1,2}:\d{2}\b', line)
+                    # --- NEW OCR TIME HUNTER ---
+                    # Finds standard times AND corrupted times (e.g., 60:28 or 6O:02)
+                    raw_times = re.findall(r'[0-9Oo]{1,2}:[0-9Oo]{2}', line)
                     
-                    if len(times) >= 1: 
-                        first_time_idx = line.find(times[0])
+                    if len(raw_times) >= 1: 
+                        first_time_idx = line.find(raw_times[0])
                         raw_site = line[:first_time_idx].strip()
                         
                         date_match = re.search(r"^([A-Z]\s*)?(\d{1,2})\s+", raw_site)
@@ -69,6 +70,20 @@ if uploaded_file is not None:
                         site_clean = re.sub(r"^([A-Z]\s*)?\d{1,2}\s+", "", site_clean) 
                         site_clean = re.sub(r"\s+\d+$", "", site_clean).strip() 
                         
+                        # --- CLEAN BYBOX GARBAGE ---
+                        site_clean = re.sub(r"\s+\d+\.\d+$", "", site_clean).strip() # Removes trailing decimals like 0.93
+                        site_clean = re.sub(r"\s+[A-Z0-9\s]{1,10}SC$", "", site_clean).strip() # Removes garbage like 1T4E SC
+                        
+                        # --- OCR TIME AUTO-CORRECTOR ---
+                        times = []
+                        for t in raw_times:
+                            t_clean = t.replace('O', '0').replace('o', '0') # Fixes O to 0
+                            hr, mn = t_clean.split(':')
+                            if hr.isdigit() and int(hr) > 23:
+                                hr = hr[0] # Fixes 60:28 back to 6:28
+                            times.append(f"{hr}:{mn}")
+                        
+                        # Smart Assignment
                         if len(times) >= 3:
                             began, arrived, left = times[0], times[1], times[2]
                         elif len(times) == 2:
@@ -93,9 +108,8 @@ if uploaded_file is not None:
         st.text_area("Raw Extracted Text", raw_text_dump, height=300)
 
     if extracted_data:
-        st.success("Data extracted! Double check for any missing times caused by PDF formatting glitches before generating.")
+        st.success("Data extracted! The OCR Time Corrector is active.")
         
-        # Added Engineer Name to the editable headers
         col1, col2, col3 = st.columns(3)
         with col1: final_date = st.text_input("Week End Date", value=week_ending_str)
         with col2: final_week = st.text_input("Week Number", value=week_number)
@@ -118,29 +132,27 @@ if uploaded_file is not None:
             for index, row in edited_df.iterrows():
                 date_num, site, arrived, left, began, raw_info = str(row["Date Num"]), str(row["Site & Ref No."]), str(row["Arrived On Site"]), str(row["Left Site"]), str(row["Began Journey"]), str(row["Original Row Info"])
                 
-                # --- NEW BREAK HANDLER ---
+                # --- BREAK HANDLER ---
                 if "BREAK" in site.upper():
-                    # Find duration of break. Usually between 'Arrived' and 'Left' on a break row.
                     b_mins = round(calc_hours(arrived, left) * 60)
-                    if b_mins == 0: b_mins = round(calc_hours(began, left) * 60) # Fallback
-                    if b_mins == 0: b_mins = round(calc_hours(began, arrived) * 60) # Fallback
+                    if b_mins == 0: b_mins = round(calc_hours(began, left) * 60) 
+                    if b_mins == 0: b_mins = round(calc_hours(began, arrived) * 60) 
                     
                     pending_break_mins += b_mins
-                    continue # Skip appending this row to the final PDF!
+                    continue 
 
-                # --- CONTINUITY RULE (Now respects skipped breaks) ---
+                # --- CONTINUITY RULE ---
                 if (began == "" or pending_break_mins > 0) and len(processed_data) > 0: 
                     began = processed_data[-1]["left"]
                     
                 travel_time, work_time = calc_hours(began, arrived), calc_hours(arrived, left)
                 
-                # --- APPLY PENDING BREAK TO THIS JOB ---
+                # --- APPLY PENDING BREAK ---
                 rest_break_display = ""
                 if pending_break_mins > 0:
                     rest_break_display = str(pending_break_mins)
-                    # Deduct the break time from the calculated travel time block
                     travel_time = max(0.0, travel_time - (pending_break_mins / 60.0))
-                    pending_break_mins = 0 # Reset for the next jobs
+                    pending_break_mins = 0 
                 
                 processed_data.append({
                     "date": date_num, 
@@ -202,7 +214,6 @@ if uploaded_file is not None:
                 day_total = 0
                 for _, row in group.iterrows():
                     row_total = row['work'] + row['travel']
-                    # Inject the Rest Break and the Row Total into the correct HTML columns
                     html_content += f"<tr><td>{row['site']}</td><td></td><td></td><td>{row['began']}</td><td>{row['arrived']}</td><td>{row['left']}</td><td>{row['work']:.2f}</td><td>{row['rest_break']}</td><td>{row['travel']:.2f}</td><td>{row_total:.2f}</td></tr>"
                     day_total += row_total
                 grand_total += day_total
