@@ -35,12 +35,13 @@ if uploaded_file is not None:
     week_number = "18"
     raw_text_dump = ""
     
-    with st.spinner("Extracting data from PDF..."):
+with st.spinner("Extracting data from PDF..."):
         with pdfplumber.open(uploaded_file) as pdf:
             for page in pdf.pages:
                 text = page.extract_text()
                 if text: raw_text_dump += text + "\n\n---PAGE BREAK---\n\n"
                 
+                # Extract Week Info
                 if "Week Ending:" in text:
                     match = re.search(r"Week Ending:\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})", text)
                     if match: week_ending_str = match.group(1)
@@ -48,31 +49,34 @@ if uploaded_file is not None:
                     match = re.search(r"Week:\s*(\d+)", text)
                     if match: week_number = match.group(1)
 
-                tables = page.extract_tables()
-                for table in tables:
-                    if table and len(table[0]) >= 5: # Relaxed column check
-                        for row in table[1:]:
-                            if not row or not row[0]: continue
-                            site_raw = str(row[0]).replace("\n", " ")
-                            if "Wrkd:" in site_raw or "Day:" in site_raw or "Prod:" in site_raw: continue
-                            
-                            try:
-                                # We try to grab columns safely
-                                began = str(row[2]).replace("\n", "").strip() if len(row) > 2 and row[2] else ""
-                                arrived = str(row[4]).replace("\n", "").strip() if len(row) > 4 and row[4] else ""
-                                left = str(row[6]).replace("\n", "").strip() if len(row) > 6 and row[6] else ""
-                                site_clean = re.sub(r"^[A-Z]{1,3}\s*\d{1,2}\s*", "", site_raw)
-                                
-                                if ":" in began or ":" in arrived or ":" in left:
-                                    extracted_data.append({
-                                        "Original Row Info": site_raw,
-                                        "Site & Ref No.": site_clean,
-                                        "Began Journey": began,
-                                        "Arrived On Site": arrived,
-                                        "Left Site": left
-                                    })
-                            except IndexError:
-                                pass
+                # --- NEW TEXT SCRAPER LOGIC ---
+                for line in text.split('\n'):
+                    # Skip summary rows and headers
+                    if "Wrkd:" in line or "Day:" in line or "Prod:" in line or "Site Miles" in line or "Hours" in line or "Batch" in line:
+                        continue
+                        
+                    # Hunt for all times formatted as HH:MM
+                    times = re.findall(r'\b\d{1,2}:\d{2}\b', line)
+                    
+                    # A valid job row must have at least Began and Arrived times
+                    if len(times) >= 2: 
+                        # Extract the site name (Everything before the first time)
+                        first_time_idx = line.find(times[0])
+                        raw_site = line[:first_time_idx].strip()
+                        
+                        # Clean up the site string:
+                        # 1. Remove the leading Day/Date (e.g., "M 20 ")
+                        site_clean = re.sub(r"^[A-Z]\s*\d{1,2}\s*", "", raw_site)
+                        # 2. Remove the standalone miles digits at the end before the time
+                        site_clean = re.sub(r"\s+\d+$", "", site_clean).strip()
+                        
+                        extracted_data.append({
+                            "Original Row Info": line,
+                            "Site & Ref No.": site_clean,
+                            "Began Journey": times[0],
+                            "Arrived On Site": times[1],
+                            "Left Site": times[2] if len(times) > 2 else "" # Grab 3rd time if it exists
+                        })
 
     if debug_mode:
         st.subheader("Raw Text from PDF (Copy/Paste this to Gemini)")
