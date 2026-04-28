@@ -106,7 +106,6 @@ def process_timesheet_data(df, end_date_obj=None, missing_weekdays=None, missing
                 
             prod_cat = "Ignored" if ("HOME" in site.upper() or "BREAK" in site.upper() or work_time == 0) else get_productivity_category(site)
             
-            # Embed full YYYY-MM-DD for precise leave tracking
             full_date_str = ""
             if end_date_obj and date_num:
                 try:
@@ -660,6 +659,7 @@ with tab4:
         latest_date_in_db = datetime.min
         
         for w_str, w_data in st.session_state.user_db["weeks"].items():
+            w_dt = None
             try:
                 w_dt = datetime.strptime(w_str, "%d %b %Y")
                 if w_dt > latest_date_in_db: latest_date_in_db = w_dt
@@ -667,16 +667,38 @@ with tab4:
             
             total_bhs_worked += int(w_data.get("Worked BHs", 0))
             l_days = w_data.get("Leave Days", "")
-            if l_days:
+            
+            if l_days and w_dt:
                 for entry in l_days.split(","):
                     entry = entry.strip()
+                    parsed_dt = None
+                    reason = ""
+                    
                     if ":" in entry:
-                        date_str, reason = entry.split(":")
-                        try:
-                            parsed_dt = datetime.strptime(date_str, "%Y-%m-%d")
-                            if "SICK" in reason: all_sick_dates.append(parsed_dt)
-                            elif "ANNUAL LEAVE" in reason: all_al_dates.append(parsed_dt)
-                        except: pass
+                        parts = entry.split(":")
+                        if len(parts) == 2:
+                            date_str = parts[0]
+                            reason = parts[1]
+                            try:
+                                parsed_dt = datetime.strptime(date_str, "%Y-%m-%d")
+                            except: pass
+                    else:
+                        # FALLBACK PARSER: For older JSON formats without colons like "12 (ANNUAL LEAVE)"
+                        match = re.search(r"(\d{1,2})\s*\((.*)\)", entry)
+                        if match:
+                            day_num = match.group(1)
+                            reason = match.group(2)
+                            try:
+                                for i in range(7):
+                                    curr = w_dt - timedelta(days=6-i)
+                                    if str(curr.day) == str(day_num):
+                                        parsed_dt = curr
+                                        break
+                            except: pass
+                            
+                    if parsed_dt and reason:
+                        if "SICK" in reason: all_sick_dates.append(parsed_dt)
+                        elif "ANNUAL LEAVE" in reason: all_al_dates.append(parsed_dt)
 
         # Leave Year Calculation (UK Tax Year: April 1st to March 31st)
         if latest_date_in_db != datetime.min:
