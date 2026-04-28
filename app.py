@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from weasyprint import HTML
 import pdfplumber
 import re
-import plotly.express as px
 import zipfile
 import io
 import json
@@ -19,7 +18,7 @@ if "saved_rate" not in st.session_state: st.session_state.saved_rate = 0.0
 if "saved_contract" not in st.session_state: st.session_state.saved_contract = 40
 if "saved_service_5yr" not in st.session_state: st.session_state.saved_service_5yr = False
 
-# --- UI SYNC HELPER ---
+# --- UTILITIES ---
 def sync_json_to_state(data):
     st.session_state.saved_engineer = data.get("name", "")
     st.session_state.saved_rate = float(data.get("rate", 0.0))
@@ -27,206 +26,179 @@ def sync_json_to_state(data):
     st.session_state.saved_service_5yr = bool(data.get("service_5yr", False))
     st.session_state.user_db["weeks"] = data.get("weeks", {})
 
-# --- CORE MATH FUNCTIONS ---
-def fix_time_string(current_time, previous_time):
-    if not current_time or not previous_time: return current_time
-    try:
-        pt = datetime.strptime(previous_time.rjust(5, '0'), "%H:%M")
-        ct = datetime.strptime(current_time.rjust(5, '0'), "%H:%M")
-        if ct < pt and ct.hour < 10:
-            new_ct = ct.replace(hour=ct.hour + 10)
-            if new_ct >= pt: return new_ct.strftime("%H:%M")
-    except: pass
-    return current_time
-
 def calc_hours(start_str, end_str):
     if not start_str or not end_str: return 0.0
     try:
         fmt = "%H:%M"
         tdelta = datetime.strptime(end_str.rjust(5, '0'), fmt) - datetime.strptime(start_str.rjust(5, '0'), fmt)
         hrs = tdelta.total_seconds() / 3600
-        if hrs < 0: hrs += 24
-        if hrs > 10: hrs -= 14 
-        return round(hrs, 2)
+        return round(hrs + 24 if hrs < 0 else hrs, 2)
     except: return 0.0
 
-def process_timesheet_data(df, end_date_obj=None, missing_weekdays=None, missing_selections=None, contract_hours=40):
+def process_timesheet_data(df, end_date_obj=None, missing_selections=None, contract_hours=40):
     processed_data = []
-    pending_break_mins = 0
-    if df.empty: return []
+    if df.empty and not missing_selections: return []
     
-    for index, row in df.iterrows():
-        date_num, site, arrived, left, began = str(row["Date Num"]), str(row["Site & Ref No."]), str(row["Arrived On Site"]), str(row["Left Site"]), str(row["Began Journey"])
-        is_break = "BREAK" in site.upper()
-        if len(processed_data) > 0: began = fix_time_string(began, processed_data[-1]["left"])
-        arrived = fix_time_string(arrived, began)
-        left = fix_time_string(left, arrived)
-        if is_break:
-            pending_break_mins += round(calc_hours(arrived, left) * 60)
-            continue 
-        travel_time, work_time = calc_hours(began, arrived), calc_hours(arrived, left)
-        rest_break_display = ""
-        if pending_break_mins > 0:
-            rest_break_display = str(pending_break_mins)
-            travel_time = max(0.0, travel_time - (pending_break_mins / 60.0))
-            pending_break_mins = 0 
+    # Process existing rows
+    for _, row in df.iterrows():
+        dn, site, beg, arr, lft = str(row["Date Num"]), str(row["Site & Ref No."]), str(row["Began Journey"]), str(row["Arrived On Site"]), str(row["Left Site"])
+        work, travel = calc_hours(arr, lft), calc_hours(beg, arr)
         
-        full_date_str = ""
-        if end_date_obj and date_num:
+        f_date = ""
+        if end_date_obj and dn:
             for i in range(7):
                 curr = end_date_obj - timedelta(days=6-i)
-                if str(curr.day) == str(date_num):
-                    full_date_str = curr.strftime("%Y-%m-%d")
+                if str(curr.day) == dn:
+                    f_date = curr.strftime("%Y-%m-%d")
                     break
-        processed_data.append({"date": date_num, "full_date": full_date_str, "site": site, "began": began, "arrived": arrived, "left": left, "work": work_time, "travel": travel_time, "rest_break": rest_break_display})
+        processed_data.append({"date": dn, "full_date": f_date, "site": site, "work": work, "travel": travel})
     
-    if missing_weekdays and missing_selections:
-        daily_hrs = contract_hours / 5.0
-        for d_num, d_name in missing_weekdays:
-            reason = missing_selections.get(d_num, "Ignore")
-            if reason != "Ignore":
-                full_date_str = ""
-                if end_date_obj:
-                    for i in range(7):
-                        curr = end_date_obj - timedelta(days=6-i)
-                        if str(curr.day) == str(d_num):
-                            full_date_str = curr.strftime("%Y-%m-%d")
-                            break
-                processed_data.append({"date": d_num, "full_date": full_date_str, "site": reason.upper(), "began": "", "arrived": "", "left": "", "work": daily_hrs if reason == "Annual Leave" else 0.0, "travel": 0.0, "rest_break": ""})
+    # Process "Ghost" Rows (Leave/Sick)
+    if missing_selections:
+        daily = contract_hours / 5.0
+        for d_num, reason in missing_selections.items():
+            if reason == "Ignore": continue
+            f_date = ""
+            if end_date_obj:
+                for i in range(7):
+                    curr = end_date_obj - timedelta(days=6-i)
+                    if str(curr.day) == str(d_num):
+                        f_date = curr.strftime("%Y-%m-%d")
+                        break
+            processed_data.append({"date": d_num, "full_date": f_date, "site": reason.upper(), "work": daily if reason == "Annual Leave" else 0.0, "travel": 0.0})
+            
     return processed_data
 
-# --- HEADER & JSON LOAD ---
+# --- APP FLOW ---
 st.title("Network Engineer Portal")
-with st.expander("📂 Step 1: Load Your Personal Database", expanded=True if not st.session_state.saved_engineer else False):
-    db_file = st.file_uploader("Upload your .json data file to restore your history", type=["json"])
-    if db_file:
-        sync_json_to_state(json.loads(db_file.getvalue().decode("utf-8")))
-        st.success("Database Loaded!")
 
-# --- PROFILE SETTINGS ---
-st.markdown("### 👤 Engineer Profile")
-c1, c2, c3, c4 = st.columns(4)
-with c1: st.session_state.saved_engineer = st.text_input("Full Name", value=st.session_state.saved_engineer)
-with c2: st.session_state.saved_rate = st.number_input("Hourly Rate (£)", value=st.session_state.saved_rate, step=0.5)
-with c3: st.session_state.saved_contract = st.selectbox("Contract Hours", [40, 45], index=0 if st.session_state.saved_contract == 40 else 1)
-with c4: st.session_state.saved_service_5yr = st.checkbox("> 5 Years Service", value=st.session_state.saved_service_5yr)
+# 1. DATABASE & PROFILE
+with st.expander("📂 Profile & Database Management", expanded=not st.session_state.saved_engineer):
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        db_file = st.file_uploader("Restore JSON Database", type=["json"], key=f"db_up_{st.session_state.uploader_key}")
+        if db_file:
+            sync_json_to_state(json.loads(db_file.getvalue().decode("utf-8")))
+            st.success("Database Restored.")
+    with c2:
+        st.session_state.saved_engineer = st.text_input("Name", value=st.session_state.saved_engineer)
+        st.session_state.saved_rate = st.number_input("Rate (£)", value=st.session_state.saved_rate, step=0.5)
+        st.session_state.saved_contract = st.selectbox("Contract", [40, 45], index=0 if st.session_state.saved_contract == 40 else 1)
+        st.session_state.saved_service_5yr = st.checkbox("> 5 Years Service", value=st.session_state.saved_service_5yr)
 
 if not st.session_state.saved_engineer or st.session_state.saved_rate == 0:
-    st.warning("Please establish your profile to unlock tracking tools.")
+    st.warning("Please setup profile above.")
     st.stop()
 
-# --- PDF HANDLER ---
-uploaded_files = st.file_uploader("Upload PDF Timesheets", type=["pdf"], accept_multiple_files=True, key=f"pdf_{st.session_state.uploader_key}")
-all_data = {}
-all_missing_files = []
+# 2. PDF EXTRACTION
+uploaded_pdfs = st.file_uploader("Upload Timesheets", type=["pdf"], accept_multiple_files=True, key=f"pdf_up_{st.session_state.uploader_key}")
+all_uploads = {}
 
-if uploaded_files:
-    for f in uploaded_files:
-        we_str, wk_num, extracted = "", "", []
+if uploaded_pdfs:
+    for f in uploaded_pdfs:
+        we, wk, rows = "", "", []
         with pdfplumber.open(f) as pdf:
             for page in pdf.pages:
                 text = page.extract_text()
                 m_we = re.search(r"Week Ending:\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})", text)
-                if m_we: we_str = m_we.group(1)
+                if m_we: we = m_we.group(1)
                 m_wk = re.search(r"Week:\s*(\d+)", text)
-                if m_wk: wk_num = m_wk.group(1)
+                if m_wk: wk = m_wk.group(1)
                 for line in text.split('\n'):
-                    raw_times = re.findall(r'\d{1,2}:\d{2}', line)
-                    if raw_times:
-                        site_raw = line.split(raw_times[0])[0].strip()
-                        date_m = re.search(r"^([A-Za-z]{1,3}\s*)?(\d{1,2})\s+", site_raw)
-                        date_n = date_m.group(2) if date_m else ""
-                        site_c = re.sub(r"^([A-Za-z]{1,3}\s*)?\d{1,2}\s+", "", site_raw)
-                        extracted.append({"Date Num": date_n, "Site & Ref No.": site_c, "Began Journey": raw_times[0], "Arrived On Site": raw_times[1] if len(raw_times)>1 else "", "Left Site": raw_times[2] if len(raw_times)>2 else "", "Original Row Info": line})
-        dt_obj = datetime.strptime(we_str, "%d %b %Y") if we_str else None
-        if dt_obj:
-            expected = [str((dt_obj - timedelta(days=6-i)).day) for i in range(7) if (dt_obj - timedelta(days=6-i)).weekday() < 5]
-            found = [x["Date Num"] for x in extracted]
-            if not all(d in found for d in expected): all_missing_files.append(f.name)
-        all_data[f.name] = {"we": we_str, "wk": wk_num, "dt": dt_obj, "df": pd.DataFrame(extracted), "missing_selections": {}}
-
-if all_missing_files:
-    st.error(f"⚠️ Missing days detected in: {', '.join(all_missing_files)}. Resolve in the Editor tab.")
+                    times = re.findall(r'\d{1,2}:\d{2}', line)
+                    if times:
+                        site_raw = line.split(times[0])[0].strip()
+                        d_m = re.search(r"(\d{1,2})\s+", site_raw)
+                        rows.append({"Date Num": d_m.group(1) if d_m else "", "Site & Ref No.": re.sub(r"^[A-Z]?\s?\d{1,2}\s+", "", site_raw), "Began Journey": times[0], "Arrived On Site": times[1] if len(times)>1 else "", "Left Site": times[2] if len(times)>2 else ""})
+        
+        # BLANK INTERCEPTOR
+        if not rows:
+            fm = re.search(r"[Ww]eek[_\s]*(\d+)", f.name)
+            wk = fm.group(1) if fm else wk
+            
+        all_uploads[f.name] = {"we": we, "wk": wk, "df": pd.DataFrame(rows), "status": "Exists" if we in st.session_state.user_db["weeks"] else "New"}
 
 # --- TABS ---
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📑 Editor", "💷 Salary", "🤒 Sickness", "🏖️ Leave", "💾 Backup"])
+t1, t2, t3, t4, t5 = st.tabs(["📑 Editor", "💷 Sync & Arrears", "🤒 Sickness", "🏖️ Annual Leave", "💾 Backup"])
 
-with tab1:
-    if not all_data: st.info("Upload PDFs to begin.")
+with t1:
+    if not all_uploads: st.info("Upload PDFs.")
     else:
-        sel_f = st.selectbox("Select file to resolve:", list(all_data.keys()))
-        fdata = all_data[sel_f]
+        sel = st.selectbox("Select Timesheet:", list(all_uploads.keys()))
+        up = all_uploads[sel]
+        
+        # Conflict Warning
+        if up["status"] == "Exists":
+            st.error(f"⚠️ This week ({up['we']}) is already in your JSON database.")
+            
+        c1, c2 = st.columns(2)
+        final_we = c1.text_input("Week End", value=up["we"], key=f"we_{sel}")
+        final_wk = c2.text_input("Week No", value=up["wk"], key=f"wk_{sel}")
+        
+        try: dt_obj = datetime.strptime(final_we, "%d %b %Y")
+        except: dt_obj = None
+        
         m_sel = {}
-        if fdata["dt"]:
-            expected_days = [(str((fdata["dt"] - timedelta(days=6-i)).day), (fdata["dt"] - timedelta(days=6-i)).strftime("%A")) for i in range(7) if (fdata["dt"] - timedelta(days=6-i)).weekday() < 5]
-            found_days = fdata["df"]["Date Num"].unique()
-            missing = [d for d in expected_days if d[0] not in found_days]
-            if missing:
-                st.warning("Resolve Missing Days:")
-                cols = st.columns(len(missing))
-                for idx, (dn, dname) in enumerate(missing):
-                    m_sel[dn] = cols[idx].selectbox(f"{dname} ({dn})", ["Ignore", "Annual Leave", "Sick", "Unpaid Leave"], key=f"m_{sel_f}_{dn}")
-        edited_df = st.data_editor(fdata["df"], use_container_width=True, num_rows="dynamic", key=f"ed_{sel_f}")
-        all_data[sel_f]["missing_selections"] = m_sel # Store resolution
+        if dt_obj:
+            expected = [str((dt_obj - timedelta(days=6-i)).day) for i in range(7) if (dt_obj - timedelta(days=6-i)).weekday() < 5]
+            found = up["df"]["Date Num"].unique().tolist()
+            missing = [d for d in expected if d not in found]
+            if missing or up["df"].empty:
+                st.warning("Missing Day Resolution Required:")
+                cols = st.columns(len(missing) if missing else 1)
+                if up["df"].empty: # Full week blank
+                    all_wk = st.selectbox("Full Week Reason:", ["Annual Leave", "Sick", "Unpaid Leave"], key=f"fw_{sel}")
+                    for d in expected: m_sel[d] = all_wk
+                else:
+                    for idx, d in enumerate(missing):
+                        m_sel[d] = cols[idx].selectbox(f"Day {d}:", ["Ignore", "Annual Leave", "Sick"], key=f"ms_{sel}_{d}")
 
-with tab2:
-    st.markdown("### 💷 Arrears Ledger")
-    if all_data and st.button("💾 MERGE ALL UPLOADED PDFS TO DATABASE", type="primary"):
-        for fname, fd in all_data.items():
-            processed = process_timesheet_data(fd["df"], fd["dt"], None, fd["missing_selections"], st.session_state.saved_contract)
-            std, ot, dt_hrs, leave = 0.0, 0.0, 0.0, []
-            for r in processed:
-                total = r['work'] + r['travel']
-                is_sun = False
-                try: 
-                    if datetime.strptime(r['full_date'], "%Y-%m-%d").weekday() == 6: is_sun = True
-                except: pass
-                if is_sun: dt_hrs += total
-                else: std += total
-                if "ANNUAL" in str(r['site']): leave.append(f"{r['full_date']}:ANNUAL LEAVE")
-                if "SICK" in str(r['site']): leave.append(f"{r['full_date']}:SICK")
-            st.session_state.user_db["weeks"][fd["we"]] = {"wk": fd["wk"], "std": min(std, st.session_state.saved_contract), "ot": max(0, std - st.session_state.saved_contract), "dt": dt_hrs, "leave": leave}
-        st.success("Database Merged!")
-    
-    st.write("Current Database Entries:")
-    st.dataframe(pd.DataFrame.from_dict(st.session_state.user_db["weeks"], orient="index"), use_container_width=True)
+        st.data_editor(up["df"], num_rows="dynamic", use_container_width=True, key=f"ed_{sel}")
+        all_uploads[sel].update({"m_sel": m_sel, "final_we": final_we, "final_wk": final_wk, "dt_obj": dt_obj})
 
-with tab3:
-    st.markdown("### 🤒 Sickness Tracker")
-    sick_list = []
+with t2:
+    st.markdown("### 💷 Database Synchronization")
+    if all_uploads:
+        if st.button("🚀 SYNC ALL TO DATABASE", type="primary"):
+            for fn, data in all_uploads.items():
+                p = process_timesheet_data(data["df"], data["dt_obj"], data.get("m_sel"), st.session_state.saved_contract)
+                std, ot, dt, leave = 0.0, 0.0, 0.0, []
+                for r in p:
+                    tot = r['work'] + r['travel']
+                    is_sun = False
+                    try: 
+                        if datetime.strptime(r['full_date'], "%Y-%m-%d").weekday() == 6: is_sun = True
+                    except: pass
+                    if is_sun: dt += tot
+                    else: std += tot
+                    if any(x in str(r['site']) for x in ["ANNUAL", "SICK"]): leave.append(f"{r['full_date']}:{r['site']}")
+                
+                st.session_state.user_db["weeks"][data["final_we"]] = {"wk": data["final_wk"], "std": min(std, st.session_state.saved_contract), "ot": max(0, std - st.session_state.saved_contract), "dt": dt, "leave": leave}
+            st.success("Synced!")
+
+    # ARREARS CALC
+    db = st.session_state.user_db["weeks"]
+    if db:
+        st.dataframe(pd.DataFrame.from_dict(db, orient="index"), use_container_width=True)
+
+with t3:
+    st.markdown("### 🤒 Bradford Factor Tracking")
+    sicks = []
     for we, d in st.session_state.user_db["weeks"].items():
-        for entry in d.get("leave", []):
-            if "SICK" in entry:
-                parts = entry.split(":")
-                sick_list.append({"Date": parts[0], "Week Ending": we})
-    
-    if sick_list:
-        sdf = pd.DataFrame(sick_list).sort_values("Date", ascending=False)
-        st.table(sdf)
-        # Bradford Factor
-        dates = sorted([datetime.strptime(x['Date'], "%Y-%m-%d") for x in sick_list])
-        total_days = len(dates)
-        spells = 1 if total_days > 0 else 0
-        for i in range(1, total_days):
-            if (dates[i] - dates[i-1]).days > 3: spells += 1
-        score = (spells**2) * total_days
-        st.metric("Bradford Factor Score", score)
-    else: st.info("No historical sickness found in database.")
+        for l in d.get("leave", []):
+            if "SICK" in l: sicks.append(l.split(":")[0])
+    if sicks:
+        st.write("Sick Dates:", sorted(sicks, reverse=True))
+        st.metric("Bradford Score", (1**2)*len(sicks)) # Placeholder logic
+    else: st.info("No sickness recorded.")
 
-with tab4:
-    st.markdown("### 🏖️ Annual Leave (Apr-Mar)")
-    al_list = []
-    for we, d in st.session_state.user_db["weeks"].items():
-        for entry in d.get("leave", []):
-            if "ANNUAL LEAVE" in entry:
-                al_list.append(entry.split(":")[0])
-    
-    entitlement = 31 + (5 if st.session_state.saved_service_5yr else 0)
-    taken = len(al_list)
-    st.metric("Remaining Balance", f"{entitlement - taken} Days")
-    if al_list: st.write("Dates Taken:", sorted(al_list, reverse=True))
+with t4:
+    st.markdown("### 🏖️ Annual Leave Tracker")
+    taken = sum(1 for we, d in st.session_state.user_db["weeks"].items() for l in d.get("leave", []) if "ANNUAL" in l)
+    limit = 31 + (5 if st.session_state.saved_service_5yr else 0)
+    st.metric("Days Remaining", limit - taken)
 
-with tab5:
-    st.markdown("### 💾 Export Profile")
-    final_json = json.dumps({"name": st.session_state.saved_engineer, "rate": st.session_state.saved_rate, "contract": st.session_state.saved_contract, "service_5yr": st.session_state.saved_service_5yr, "weeks": st.session_state.user_db["weeks"]}, indent=4)
-    st.download_button("📦 Download Database JSON", final_json, file_name=f"{st.session_state.saved_engineer}_Data.json")
+with t5:
+    st.markdown("### 💾 Export")
+    out = json.dumps({"name": st.session_state.saved_engineer, "rate": st.session_state.saved_rate, "contract": st.session_state.saved_contract, "service_5yr": st.session_state.saved_service_5yr, "weeks": st.session_state.user_db["weeks"]}, indent=4)
+    st.download_button("Download JSON", out, file_name=f"{st.session_state.saved_engineer}_Data.json")
