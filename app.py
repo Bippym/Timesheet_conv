@@ -12,7 +12,7 @@ st.title("Network (Catering Engineers) Ltd - Timesheet Converter")
 st.markdown("Upload your work-style PDF. The app will extract the data, apply your continuity rules, and generate the manual-style PDF.")
 
 # --- DEBUG TOGGLE ---
-debug_mode = st.checkbox("Debug Mode: Show Raw PDF Text (Use if table extraction fails)")
+debug_mode = st.checkbox("Debug Mode: Show Raw PDF Text (Use if extraction fails)")
 
 def calc_hours(start_str, end_str):
     if not start_str or not end_str or pd.isna(start_str) or pd.isna(end_str): return 0.0
@@ -35,13 +35,12 @@ if uploaded_file is not None:
     week_number = "18"
     raw_text_dump = ""
     
-with st.spinner("Extracting data from PDF..."):
+    with st.spinner("Extracting data from PDF..."):
         with pdfplumber.open(uploaded_file) as pdf:
             for page in pdf.pages:
                 text = page.extract_text()
                 if text: raw_text_dump += text + "\n\n---PAGE BREAK---\n\n"
                 
-                # Extract Week Info
                 if "Week Ending:" in text:
                     match = re.search(r"Week Ending:\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})", text)
                     if match: week_ending_str = match.group(1)
@@ -51,35 +50,31 @@ with st.spinner("Extracting data from PDF..."):
 
                 # --- NEW TEXT SCRAPER LOGIC ---
                 for line in text.split('\n'):
-                    # Skip summary rows and headers
                     if "Wrkd:" in line or "Day:" in line or "Prod:" in line or "Site Miles" in line or "Hours" in line or "Batch" in line:
                         continue
                         
                     # Hunt for all times formatted as HH:MM
                     times = re.findall(r'\b\d{1,2}:\d{2}\b', line)
                     
-                    # A valid job row must have at least Began and Arrived times
                     if len(times) >= 2: 
-                        # Extract the site name (Everything before the first time)
                         first_time_idx = line.find(times[0])
                         raw_site = line[:first_time_idx].strip()
                         
-                        # Clean up the site string:
-                        # 1. Remove the leading Day/Date (e.g., "M 20 ")
-                        site_clean = re.sub(r"^[A-Z]\s*\d{1,2}\s*", "", raw_site)
-                        # 2. Remove the standalone miles digits at the end before the time
-                        site_clean = re.sub(r"\s+\d+$", "", site_clean).strip()
+                        # Clean up the site string
+                        site_clean = raw_site.split("**QUOTE")[0].strip() # Remove the garbled quote data
+                        site_clean = re.sub(r"^[A-Z]\s*\d{1,2}\s*", "", site_clean) # Remove the Day/Date prefix (e.g., M 20)
+                        site_clean = re.sub(r"\s+\d+$", "", site_clean).strip() # Remove the miles digit just before the time
                         
                         extracted_data.append({
                             "Original Row Info": line,
                             "Site & Ref No.": site_clean,
                             "Began Journey": times[0],
                             "Arrived On Site": times[1],
-                            "Left Site": times[2] if len(times) > 2 else "" # Grab 3rd time if it exists
+                            "Left Site": times[2] if len(times) > 2 else ""
                         })
 
     if debug_mode:
-        st.subheader("Raw Text from PDF (Copy/Paste this to Gemini)")
+        st.subheader("Raw Text from PDF")
         st.text_area("Raw Extracted Text", raw_text_dump, height=300)
 
     if extracted_data:
@@ -95,7 +90,7 @@ with st.spinner("Extracting data from PDF..."):
             processed_data = []
             has_weekend = False
             for site_str in df["Original Row Info"].astype(str):
-                if " S " in site_str or " S" in site_str or "SAT" in site_str or "SUN" in site_str: has_weekend = True
+                if re.match(r"^[S]\s*\d{1,2}", site_str): has_weekend = True # Check if line starts with S (Saturday/Sunday)
                     
             on_call_status = "Yes" if has_weekend else "No"
             
@@ -137,9 +132,12 @@ with st.spinner("Extracting data from PDF..."):
             
             grand_total = 0
             for row in processed_data:
-                if re.match(r"^[A-Z]{1,3}\s*\d{1,2}", str(row['raw_info'])):
-                     day_indicator = re.match(r"^([A-Z]{1,3}\s*\d{1,2})", str(row['raw_info'])).group(1)
-                     html_content += f'<tr><td colspan="10" class="day-row">{day_indicator}</td></tr>'
+                if re.match(r"^[A-Z]\s*\d{1,2}", str(row['raw_info'])):
+                     day_letter = str(row['raw_info'])[0]
+                     day_map = {"M": "MONDAY", "T": "TUESDAY", "W": "WEDNESDAY", "F": "FRIDAY", "S": "SAT/SUN"}
+                     day_display = day_map.get(day_letter, day_letter)
+                     html_content += f'<tr><td colspan="10" class="day-row">{day_display}</td></tr>'
+                     
                 day_total = row['work'] + row['travel']
                 grand_total += day_total
                 html_content += f"<tr><td>{row['site']}</td><td></td><td></td><td>{row['began']}</td><td>{row['arrived']}</td><td>{row['left']}</td><td>{row['work']:.2f}</td><td></td><td>{row['travel']:.2f}</td><td></td></tr>"
@@ -148,5 +146,3 @@ with st.spinner("Extracting data from PDF..."):
             
             st.success("PDF Generated Successfully!")
             st.download_button(label="Download Timesheet PDF", data=HTML(string=html_content).write_pdf(), file_name=f"MGR_Timesheet_Week_{final_week}.pdf", mime="application/pdf")
-    else:
-        st.warning("Could not extract table data. Ensure this is the correct Work-Style PDF.")
