@@ -504,7 +504,7 @@ with tab3:
                     
                     if str(row['date']) in bank_holidays:
                         is_dt = True
-                        if day_total > 0: worked_bhs += 1 # TOIL Engine: Bank Holiday Worked!
+                        if day_total > 0: worked_bhs += 1 
                         
                     try:
                         dt_obj = datetime.strptime(row['Week End'], "%d %b %Y")
@@ -518,7 +518,6 @@ with tab3:
                     
                     s_upper = str(row['site']).upper()
                     if "ANNUAL LEAVE" in s_upper or "SICK" in s_upper or "UNPAID LEAVE" in s_upper:
-                        # Append explicit YYYY-MM-DD for HR tracking if available
                         ld_str = f"{row['full_date']}:{s_upper}" if row.get("full_date") else f"{row['date']} ({s_upper})"
                         leave_days.append(ld_str)
 
@@ -535,7 +534,6 @@ with tab3:
                 }
             st.success("Uploaded timesheets processed and saved to your Personal Database!")
 
-    # Build Ledger from User Database
     if not st.session_state.user_db["weeks"]:
         st.warning("Your database is empty. Upload timesheets and push them to the database, or load a previous database file in Tab 4.")
     else:
@@ -586,20 +584,50 @@ with tab3:
 
         st.dataframe(pd.DataFrame(payroll_data), use_container_width=True)
         
+        # --- ANNUAL EARNINGS & TYTD PROJECTION ---
+        st.markdown("---")
+        st.markdown("### 📊 Tax Year Pay Tracking")
+        
+        latest_date_in_db = datetime.min
+        for w_str in st.session_state.user_db["weeks"]:
+            try:
+                w_dt = datetime.strptime(w_str, "%d %b %Y")
+                if w_dt > latest_date_in_db: latest_date_in_db = w_dt
+            except: pass
+        
+        tytd_gross = 0.0
+        tax_yr_str = "Unknown"
+        
+        if latest_date_in_db != datetime.min:
+            if latest_date_in_db.month >= 4:
+                tax_yr_start = datetime(latest_date_in_db.year, 4, 1)
+                tax_yr_end = datetime(latest_date_in_db.year + 1, 3, 31)
+            else:
+                tax_yr_start = datetime(latest_date_in_db.year - 1, 4, 1)
+                tax_yr_end = datetime(latest_date_in_db.year, 3, 31)
+                
+            tax_yr_str = f"Apr {tax_yr_start.year} - Mar {tax_yr_end.year}"
+            
+            for w_str, w_data in st.session_state.user_db["weeks"].items():
+                try:
+                    w_dt = datetime.strptime(w_str, "%d %b %Y")
+                    if tax_yr_start <= w_dt <= tax_yr_end:
+                        week_gross = (w_data.get("Standard", 0.0) * rate) + \
+                                     (w_data.get("Overtime", 0.0) * (rate * 1.5)) + \
+                                     (w_data.get("Double Time", 0.0) * (rate * 2.0))
+                        tytd_gross += week_gross
+                except: pass
+
         actual_weeks_in_db = len(st.session_state.user_db["weeks"])
         if actual_weeks_in_db > 0:
             true_total_gross = (total_base_hrs * rate) + (total_ot_hrs * (rate * 1.5)) + (total_dt_hrs * (rate * 2.0))
             avg_weekly_gross = true_total_gross / actual_weeks_in_db
             est_annual_gross = avg_weekly_gross * 52
             
-            st.markdown("---")
-            st.markdown("### 📊 Annual Earnings Projection")
-            st.info("This projection isolates the exact true gross pay stored in your database to find your true weekly average, then extrapolates it across a full 52-week year.")
-            
-            a1, a2, a3 = st.columns(3)
-            a1.metric("Avg. True Weekly Gross", f"£{avg_weekly_gross:,.2f}")
-            a2.metric("Multiplier", "x 52 Weeks")
-            a3.metric("Est. Annual Gross", f"£{est_annual_gross:,.2f}")
+            t1, t2, t3 = st.columns(3)
+            t1.metric(f"Tax Year-To-Date Gross ({tax_yr_str})", f"£{tytd_gross:,.2f}")
+            t2.metric("Avg. True Weekly Gross", f"£{avg_weekly_gross:,.2f}")
+            t3.metric("Est. Annual Gross (Based on Avg)", f"£{est_annual_gross:,.2f}")
 
 # --- TAB 4: DATABASE MANAGER ---
 with tab4:
@@ -626,11 +654,9 @@ with tab4:
         st.markdown("---")
         st.markdown("### 🏖️ HR & Bradford Factor Dashboard")
         
-        # 1. Date Extraction & Parsing
         all_sick_dates = []
         all_al_dates = []
         total_bhs_worked = 0
-        
         latest_date_in_db = datetime.min
         
         for w_str, w_data in st.session_state.user_db["weeks"].items():
@@ -640,7 +666,6 @@ with tab4:
             except: pass
             
             total_bhs_worked += int(w_data.get("Worked BHs", 0))
-            
             l_days = w_data.get("Leave Days", "")
             if l_days:
                 for entry in l_days.split(","):
@@ -653,34 +678,32 @@ with tab4:
                             elif "ANNUAL LEAVE" in reason: all_al_dates.append(parsed_dt)
                         except: pass
 
-        # 2. Leave Year Calculation (Feb 1st to Jan 31st)
+        # Leave Year Calculation (UK Tax Year: April 1st to March 31st)
         if latest_date_in_db != datetime.min:
-            if latest_date_in_db.month >= 2:
-                leave_yr_start = datetime(latest_date_in_db.year, 2, 1)
-                leave_yr_end = datetime(latest_date_in_db.year + 1, 1, 31)
+            if latest_date_in_db.month >= 4:
+                leave_yr_start = datetime(latest_date_in_db.year, 4, 1)
+                leave_yr_end = datetime(latest_date_in_db.year + 1, 3, 31)
             else:
-                leave_yr_start = datetime(latest_date_in_db.year - 1, 2, 1)
-                leave_yr_end = datetime(latest_date_in_db.year, 1, 31)
+                leave_yr_start = datetime(latest_date_in_db.year - 1, 4, 1)
+                leave_yr_end = datetime(latest_date_in_db.year, 3, 31)
                 
-            ly_str = f"{leave_yr_start.strftime('%b %Y')} - {leave_yr_end.strftime('%b %Y')}"
-            
+            ly_str = f"{leave_yr_start.strftime('%d %b %Y')} - {leave_yr_end.strftime('%d %b %Y')}"
             al_taken_this_year = sum(1 for d in all_al_dates if leave_yr_start <= d <= leave_yr_end)
             
-            base_leave = 31 # 23 Base + 8 BH
+            base_leave = 31 
             service_bonus = 5 if st.session_state.saved_service_5yr else 0
             total_entitlement = base_leave + service_bonus + total_bhs_worked
             remaining_leave = total_entitlement - al_taken_this_year
             
             h1, h2, h3, h4 = st.columns(4)
-            h1.metric("Leave Year", ly_str)
+            h1.metric("Leave/Tax Year", ly_str)
             h2.metric("Total Entitlement (Inc TOIL)", f"{total_entitlement} Days")
             h3.metric("Annual Leave Taken", f"{al_taken_this_year} Days")
             h4.metric("Remaining Balance", f"{remaining_leave} Days", delta=f"{total_bhs_worked} TOIL Earned", delta_color="normal")
 
-        # 3. Bradford Factor Engine (Rolling 52 Weeks)
+        # Bradford Factor Engine (Rolling 52 Weeks)
         st.markdown("#### 🤒 Bradford Factor (Rolling 52-Week)")
         rolling_start = latest_date_in_db - timedelta(weeks=52) if latest_date_in_db != datetime.min else datetime.min
-        
         valid_sick_dates = sorted([d for d in all_sick_dates if d >= rolling_start])
         
         spells = 0
@@ -689,7 +712,6 @@ with tab4:
         if total_sick_days > 0:
             spells = 1
             for i in range(1, total_sick_days):
-                # If gap is > 3 days, it's a new spell (allows for sick Friday + sick Monday = 1 spell)
                 if (valid_sick_dates[i] - valid_sick_dates[i-1]).days > 3:
                     spells += 1
                     
