@@ -4,10 +4,15 @@ from datetime import datetime, timedelta
 from weasyprint import HTML
 import pdfplumber
 import re
+import plotly.express as px
 
 st.set_page_config(page_title="Network Timesheet Generator", layout="wide")
 
-# --- SESSION STATE CACHING (Remember Me) ---
+# --- SIDEBAR & SESSION STATE ---
+with st.sidebar:
+    st.header("⚙️ Advanced Settings")
+    debug_mode = st.checkbox("Enable Developer Debug Mode")
+
 if "saved_contract" not in st.session_state: st.session_state.saved_contract = 40
 if "saved_rate" not in st.session_state: st.session_state.saved_rate = 0.00
 if "saved_engineer" not in st.session_state: st.session_state.saved_engineer = "UNKNOWN ENGINEER"
@@ -15,25 +20,19 @@ if "saved_engineer" not in st.session_state: st.session_state.saved_engineer = "
 st.title("Network (Catering Engineers) Ltd - Timesheet Converter")
 st.markdown("Upload your work-style PDF. The app will extract the data, apply your continuity rules, and generate the manual-style PDF.")
 
-debug_mode = st.checkbox("Debug Mode: Show Raw PDF Text")
-
 # --- MATH & CONTINUITY FUNCTIONS ---
 def fix_time_string(current_time, previous_time):
-    if not current_time or not previous_time or current_time == "" or previous_time == "": 
-        return current_time
+    if not current_time or not previous_time or current_time == "" or previous_time == "": return current_time
     try:
         pt_str = "0" + previous_time if len(previous_time.split(":")[0]) == 1 else previous_time
         ct_str = "0" + current_time if len(current_time.split(":")[0]) == 1 else current_time
-        
         pt = datetime.strptime(pt_str, "%H:%M")
         ct = datetime.strptime(ct_str, "%H:%M")
-        
         if ct < pt and ct.hour < 10:
             new_hour = ct.hour + 10
             if new_hour < 24:
                 new_ct = ct.replace(hour=new_hour)
-                if new_ct >= pt:
-                    return new_ct.strftime("%H:%M").lstrip("0") if new_ct.hour < 10 else new_ct.strftime("%H:%M")
+                if new_ct >= pt: return new_ct.strftime("%H:%M").lstrip("0") if new_ct.hour < 10 else new_ct.strftime("%H:%M")
     except: pass
     return current_time
 
@@ -46,19 +45,16 @@ def calc_hours(start_str, end_str):
         if len(start_str.split(":")[0]) == 1: start_str = "0" + start_str
         if len(end_str.split(":")[0]) == 1: end_str = "0" + end_str
         tdelta = datetime.strptime(end_str, fmt) - datetime.strptime(start_str, fmt)
-        
         if tdelta.days < 0:
             hrs = (timedelta(days=1) + tdelta).total_seconds() / 3600
             if hrs > 10: return round(hrs - 14, 2) 
             return round(hrs, 2)
-            
         return round(tdelta.total_seconds() / 3600, 2)
     except: return 0.0
 
 def process_timesheet_data(df, end_date_obj, missing_weekdays, missing_selections, contract_hours):
     processed_data = []
     pending_break_mins = 0
-    
     for index, row in df.iterrows():
         date_num, site, arrived, left, began = str(row["Date Num"]), str(row["Site & Ref No."]), str(row["Arrived On Site"]), str(row["Left Site"]), str(row["Began Journey"])
         is_break = "BREAK" in site.upper()
@@ -66,12 +62,9 @@ def process_timesheet_data(df, end_date_obj, missing_weekdays, missing_selection
         if not is_break and len(processed_data) > 0:
             prev_left = processed_data[-1]["left"]
             prev_date = processed_data[-1]["date"]
-            if date_num == prev_date and prev_left != "" and pending_break_mins == 0:
-                began = prev_left
+            if date_num == prev_date and prev_left != "" and pending_break_mins == 0: began = prev_left
                 
-        if len(processed_data) > 0:
-            prev_left_time = processed_data[-1]["left"]
-            began = fix_time_string(began, prev_left_time)
+        if len(processed_data) > 0: began = fix_time_string(began, processed_data[-1]["left"])
         arrived = fix_time_string(arrived, began)
         left = fix_time_string(left, arrived)
         
@@ -82,8 +75,7 @@ def process_timesheet_data(df, end_date_obj, missing_weekdays, missing_selection
             pending_break_mins += b_mins
             continue 
 
-        if began == "" and len(processed_data) > 0: 
-            began = processed_data[-1]["left"]
+        if began == "" and len(processed_data) > 0: began = processed_data[-1]["left"]
             
         travel_time, work_time = calc_hours(began, arrived), calc_hours(arrived, left)
         rest_break_display = ""
@@ -92,24 +84,16 @@ def process_timesheet_data(df, end_date_obj, missing_weekdays, missing_selection
             travel_time = max(0.0, travel_time - (pending_break_mins / 60.0))
             pending_break_mins = 0 
         
-        processed_data.append({
-            "date": date_num, "site": site, "began": began, "arrived": arrived, 
-            "left": left, "work": work_time, "travel": travel_time, "rest_break": rest_break_display
-        })
+        processed_data.append({"date": date_num, "site": site, "began": began, "arrived": arrived, "left": left, "work": work_time, "travel": travel_time, "rest_break": rest_break_display})
         
-    # --- INJECT MISSING DAYS ---
     if missing_weekdays and missing_selections:
         daily_hrs = contract_hours / 5.0
         for d_num, d_name in missing_weekdays:
             reason = missing_selections.get(d_num, "Ignore")
             if reason != "Ignore":
                 hrs = daily_hrs if reason == "Annual Leave" else 0.0
-                processed_data.append({
-                    "date": d_num, "site": reason.upper(), "began": "", "arrived": "", 
-                    "left": "", "work": hrs, "travel": 0.0, "rest_break": ""
-                })
+                processed_data.append({"date": d_num, "site": reason.upper(), "began": "", "arrived": "", "left": "", "work": hrs, "travel": 0.0, "rest_break": ""})
                 
-    # --- CHRONOLOGICAL SORTER ---
     if end_date_obj:
         def get_sort_date(d_num):
             for i in range(7):
@@ -119,7 +103,6 @@ def process_timesheet_data(df, end_date_obj, missing_weekdays, missing_selection
         processed_data.sort(key=lambda x: get_sort_date(x["date"]))
         
     return processed_data
-
 
 # --- EXTRACTION ROUTINE ---
 uploaded_file = st.file_uploader("Upload Work-Style Timesheet (PDF)", type=["pdf"])
@@ -177,14 +160,7 @@ if uploaded_file is not None:
                             else: began, arrived, left = "", times[0], times[1]
                         else: began, arrived, left = "", times[0], ""
                         
-                        extracted_data.append({
-                            "Date Num": date_num, "Original Row Info": line, "Site & Ref No.": site_clean,
-                            "Began Journey": began, "Arrived On Site": arrived, "Left Site": left
-                        })
-
-    if debug_mode:
-        st.subheader("Raw Text from PDF")
-        st.text_area("Raw Extracted Text", raw_text_dump, height=300)
+                        extracted_data.append({"Date Num": date_num, "Original Row Info": line, "Site & Ref No.": site_clean, "Began Journey": began, "Arrived On Site": arrived, "Left Site": left})
 
     if extracted_data:
         # --- CORE DASHBOARD HEADERS ---
@@ -192,7 +168,6 @@ if uploaded_file is not None:
         with c1: final_date = st.text_input("Week End Date", value=week_ending_str)
         with c2: final_week = st.text_input("Week Number", value=week_number)
         
-        # Inputs tied to Session State
         def update_eng(): st.session_state.saved_engineer = st.session_state.eng_input
         def update_con(): st.session_state.saved_contract = st.session_state.con_input
         
@@ -209,8 +184,7 @@ if uploaded_file is not None:
             expected_weekdays = []
             for i in range(7): 
                 curr = end_date_obj - timedelta(days=6-i)
-                if curr.weekday() < 5: # Monday to Friday
-                    expected_weekdays.append((str(curr.day), curr.strftime("%A")))
+                if curr.weekday() < 5: expected_weekdays.append((str(curr.day), curr.strftime("%A")))
         except:
             end_date_obj = None
             expected_weekdays = []
@@ -224,24 +198,58 @@ if uploaded_file is not None:
             st.markdown("Please specify the reason for the missing days so they are correctly documented on your timesheet:")
             cols = st.columns(len(missing_weekdays))
             for idx, (d_num, d_name) in enumerate(missing_weekdays):
-                with cols[idx]:
-                    missing_selections[d_num] = st.selectbox(f"{d_name} ({d_num})", ["Ignore", "Sick", "Annual Leave", "Unpaid Leave"], key=f"miss_{d_num}")
+                with cols[idx]: missing_selections[d_num] = st.selectbox(f"{d_name} ({d_num})", ["Ignore", "Sick", "Annual Leave", "Unpaid Leave"], key=f"miss_{d_num}")
 
-        # --- PRE-PROCESS DATA FOR CHARTS AND PAY ---
         proc_data = process_timesheet_data(edited_df, end_date_obj, missing_weekdays, missing_selections, contract_hours)
         df_proc = pd.DataFrame(proc_data)
 
         # --- VISUAL ANALYTICS ---
-        st.markdown("### 📊 Weekly Breakdown: Work vs. Travel")
-        try:
-            chart_data = df_proc.groupby("date")[["work", "travel"]].sum()
-            st.bar_chart(chart_data, height=300)
-        except: pass
+        st.markdown("---")
+        st.markdown("### 📊 Weekly Performance Analytics")
+        a1, a2 = st.columns(2)
 
-        # --- NEW PAY CALCULATOR (INFO ONLY) ---
+        with a1:
+            st.markdown("**Time Distribution (Work vs. Travel)**")
+            total_work = df_proc['work'].sum()
+            total_travel = df_proc['travel'].sum()
+            if total_work + total_travel > 0:
+                pie_data = pd.DataFrame({
+                    "Category": ["On-Site Work", "Travel Time"],
+                    "Hours": [total_work, total_travel]
+                })
+                fig = px.pie(pie_data, values='Hours', names='Category', hole=0.4, color_discrete_sequence=['#2e7b32', '#1976d2'])
+                fig.update_traces(textposition='inside', textinfo='percent+label')
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No data available to chart.")
+
+        with a2:
+            st.markdown("**Time Spent by Task Type (Hours)**")
+            job_types = {"BYBOX": 0.0, "PARTS & DEPOT": 0.0, "SUPERVISOR": 0.0, "TRAINING": 0.0, "STANDARD JOBS": 0.0}
+            for _, row in df_proc.iterrows():
+                s = str(row['site']).upper()
+                w = float(row['work'])
+                if "BYBOX" in s: job_types["BYBOX"] += w
+                elif "PARTS" in s or "COLLECTING" in s: job_types["PARTS & DEPOT"] += w
+                elif "SUPERVISOR" in s: job_types["SUPERVISOR"] += w
+                elif "TRAIN" in s: job_types["TRAINING"] += w
+                elif "HOME" in s or "BREAK" in s or w == 0: pass
+                else: job_types["STANDARD JOBS"] += w
+
+            job_df = pd.DataFrame(list(job_types.items()), columns=['Task Type', 'Hours'])
+            job_df = job_df[job_df['Hours'] > 0].sort_values(by='Hours', ascending=True)
+
+            if not job_df.empty:
+                fig2 = px.bar(job_df, x='Hours', y='Task Type', orientation='h', text='Hours', color_discrete_sequence=['#ff9800'])
+                fig2.update_traces(texttemplate='%{text:.2f}h', textposition='outside')
+                fig2.update_layout(xaxis_title="Total Hours", yaxis_title="")
+                st.plotly_chart(fig2, use_container_width=True)
+            else:
+                st.info("No tasks recorded yet.")
+
+        # --- PAY CALCULATOR ---
         with st.expander("💰 Expected Pay Calculator (Info Only)", expanded=False):
             st.info("This section is for your reference only and will NOT appear on the generated PDF.")
-            
             def update_rate(): st.session_state.saved_rate = st.session_state.rate_input
             
             p1, p2 = st.columns(2)
@@ -252,35 +260,26 @@ if uploaded_file is not None:
                 bh_options = [f"{d[1]} {d[0]}" for d in all_dates]
                 bank_holidays_raw = st.multiselect("Select any dates that were Bank Holidays (Pays 2x):", options=bh_options)
                 bank_holidays = [b.split(" ")[1] for b in bank_holidays_raw]
-            else:
-                bank_holidays = []
+            else: bank_holidays = []
 
             if st.button("Calculate Expected Pay"):
-                double_time_hours = 0.0
-                standard_time_hours = 0.0
-
+                double_time_hours, standard_time_hours = 0.0, 0.0
                 for date, group in df_proc.groupby("date", sort=False):
                     day_total = group['work'].sum() + group['travel'].sum()
                     is_double_time = False
-
-                    if str(date) in bank_holidays:
-                        is_double_time = True
+                    if str(date) in bank_holidays: is_double_time = True
                     elif end_date_obj:
                         for i in range(7):
                             curr = end_date_obj - timedelta(days=6-i)
-                            if str(curr.day) == str(date) and curr.weekday() == 6: # Sunday check
+                            if str(curr.day) == str(date) and curr.weekday() == 6:
                                 is_double_time = True
                                 break
-
                     if is_double_time: double_time_hours += day_total
                     else: standard_time_hours += day_total
 
                 base_hrs = min(standard_time_hours, contract_hours)
                 overtime_hrs = max(0, standard_time_hours - contract_hours)
-
-                base_pay = base_hrs * rate
-                overtime_pay = overtime_hrs * (rate * 1.5)
-                double_pay = double_time_hours * (rate * 2.0)
+                base_pay, overtime_pay, double_pay = base_hrs * rate, overtime_hrs * (rate * 1.5), double_time_hours * (rate * 2.0)
                 total_pay = base_pay + overtime_pay + double_pay
 
                 st.markdown("---")
@@ -326,7 +325,6 @@ if uploaded_file is not None:
             """
             
             grand_total = 0
-            
             for date, group in df_proc.groupby("date", sort=False):
                 try:
                     end_date_obj_html = datetime.strptime(final_date, "%d %b %Y")
@@ -341,7 +339,6 @@ if uploaded_file is not None:
                     day_str = f"Date: {date}"
                     
                 html_content += f'<tr><td colspan="10" class="day-row">{day_str}</td></tr>'
-                
                 day_total = 0
                 for _, row in group.iterrows():
                     row_total = row['work'] + row['travel']
@@ -355,3 +352,9 @@ if uploaded_file is not None:
             
             st.success("PDF Generated Successfully!")
             st.download_button(label="Download Timesheet PDF", data=HTML(string=html_content).write_pdf(), file_name=f"{final_engineer.replace(' ', '_')}_Timesheet_Week_{final_week}.pdf", mime="application/pdf")
+
+    # --- DEBUG MODE (MOVED TO BOTTOM) ---
+    if debug_mode and raw_text_dump:
+        st.markdown("---")
+        st.subheader("🛠️ Developer Diagnostic Text")
+        st.text_area("Raw Extraction Output", raw_text_dump, height=400)
