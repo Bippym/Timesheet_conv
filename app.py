@@ -63,7 +63,6 @@ def process_timesheet_data(df, end_date_obj=None, missing_weekdays=None, missing
     processed_data = []
     pending_break_mins = 0
     
-    # Ensure df isn't completely empty before iterating to avoid errors
     if not df.empty:
         for index, row in df.iterrows():
             date_num, site, arrived, left, began = str(row["Date Num"]), str(row["Site & Ref No."]), str(row["Arrived On Site"]), str(row["Left Site"]), str(row["Began Journey"])
@@ -179,12 +178,10 @@ def generate_pdf_html(df_processed, engineer, week_end_date, week_number, on_cal
     html_content += f"</tbody></table><div style='margin-top: 20px; font-weight: bold; text-align: right; border-top: 1px solid #000; padding-top: 5px;'>Weekly Total Hours: {grand_total:.2f}</div></body></html>"
     return html_content
 
-
 # --- MULTI-FILE EXTRACTION ROUTINE ---
 uploaded_files = st.file_uploader("Upload Work-Style Timesheets (PDF)", type=["pdf"], accept_multiple_files=True)
 
 if uploaded_files:
-    # 1. Global User Settings
     c1, c2 = st.columns(2)
     def update_eng(): st.session_state.saved_engineer = st.session_state.eng_input
     def update_con(): st.session_state.saved_contract = st.session_state.con_input
@@ -197,7 +194,7 @@ if uploaded_files:
     with st.spinner("Processing all uploaded timesheets..."):
         for uploaded_file in uploaded_files:
             extracted_data = []
-            week_ending_str, week_number = "", "Unknown"
+            week_ending_str, week_number = "", ""
             raw_text_dump = ""
             
             with pdfplumber.open(uploaded_file) as pdf:
@@ -256,7 +253,6 @@ if uploaded_files:
                 dt_obj = None
                 month_label = "Unknown Month"
 
-            # THE FIX: Force the creation of skeleton columns even if extracted_data is empty
             df_cols = ["Date Num", "Original Row Info", "Site & Ref No.", "Began Journey", "Arrived On Site", "Left Site"]
             df_extracted = pd.DataFrame(extracted_data, columns=df_cols)
 
@@ -270,40 +266,61 @@ if uploaded_files:
                 "missing_selections": {}
             }
 
-    # 2. Global Missing Days Resolution
+    # --- THE BLANK TIMESHEET INTERCEPTOR & MISSING DAYS RESOLVER ---
     st.markdown("---")
-    st.markdown("### ⚠️ Global Missing Days Resolution")
+    st.markdown("### ⚠️ Global Timesheet Resolution")
     any_missing = False
     
     for file_name, d_packet in datasets.items():
-        if d_packet["dt_obj"]:
-            expected_weekdays = []
-            for i in range(7): 
-                curr = d_packet["dt_obj"] - timedelta(days=6-i)
-                if curr.weekday() < 5: expected_weekdays.append((str(curr.day), curr.strftime("%A")))
+        if d_packet["df"].empty:
+            any_missing = True
+            st.warning(f"📄 **{file_name}** is completely blank (0 jobs logged).")
+            st.markdown("Please confirm the details below to generate a Timesheet for this absence:")
             
-            extracted_dates = d_packet["df"]["Date Num"].replace("", pd.NA).dropna().unique().tolist()
-            missing_weekdays = [d for d in expected_weekdays if d[0] not in extracted_dates]
+            # Form to assign Week End Date and Reason to completely blank files
+            c1, c2, c3 = st.columns(3)
+            with c1: manual_we = st.text_input("Week End Date (e.g. 26 Apr 2026)", value=d_packet["week_ending"], key=f"we_{file_name}")
+            with c2: manual_wk = st.text_input("Week Number", value=d_packet["week_number"], key=f"wk_{file_name}")
+            with c3: full_week_reason = st.selectbox("Reason for Full Week Absence", ["Ignore", "Annual Leave", "Sick", "Unpaid Leave"], key=f"rsn_{file_name}")
             
-            if missing_weekdays:
-                any_missing = True
-                st.warning(f"Missing days detected in: **{file_name}** (Week Ending: {d_packet['week_ending']})")
-                cols = st.columns(len(missing_weekdays))
-                for idx, (d_num, d_name) in enumerate(missing_weekdays):
-                    with cols[idx]: 
-                        datasets[file_name]["missing_selections"][d_num] = st.selectbox(f"{d_name} ({d_num})", ["Ignore", "Sick", "Annual Leave", "Unpaid Leave"], key=f"global_miss_{file_name}_{d_num}")
+            datasets[file_name]["week_ending"] = manual_we
+            datasets[file_name]["week_number"] = manual_wk
+            
+            try:
+                dt_obj = datetime.strptime(manual_we, "%d %b %Y")
+                datasets[file_name]["dt_obj"] = dt_obj
+                datasets[file_name]["month_label"] = dt_obj.strftime("%B %Y")
+            except ValueError:
+                datasets[file_name]["dt_obj"] = None
+                
+            if datasets[file_name]["dt_obj"] and full_week_reason != "Ignore":
+                for i in range(7):
+                    curr = datasets[file_name]["dt_obj"] - timedelta(days=6-i)
+                    if curr.weekday() < 5: 
+                        datasets[file_name]["missing_selections"][str(curr.day)] = full_week_reason
+        else:
+            # Standard Missing Days Resolver for partially filled sheets
+            if d_packet["dt_obj"]:
+                expected_weekdays = [(str((d_packet["dt_obj"] - timedelta(days=6-i)).day), (d_packet["dt_obj"] - timedelta(days=6-i)).strftime("%A")) for i in range(7) if (d_packet["dt_obj"] - timedelta(days=6-i)).weekday() < 5]
+                extracted_dates = d_packet["df"]["Date Num"].replace("", pd.NA).dropna().unique().tolist()
+                missing_weekdays = [d for d in expected_weekdays if d[0] not in extracted_dates]
+                
+                if missing_weekdays:
+                    any_missing = True
+                    st.warning(f"Missing days detected in: **{file_name}** (Week Ending: {d_packet['week_ending']})")
+                    cols = st.columns(len(missing_weekdays))
+                    for idx, (d_num, d_name) in enumerate(missing_weekdays):
+                        with cols[idx]: 
+                            datasets[file_name]["missing_selections"][d_num] = st.selectbox(f"{d_name} ({d_num})", ["Ignore", "Sick", "Annual Leave", "Unpaid Leave"], key=f"miss_{file_name}_{d_num}")
                 
     if not any_missing:
-        st.success("No missing weekdays detected across all uploaded files.")
+        st.success("No missing weekdays detected across all uploaded files. Ready to generate!")
 
-    # 3. Compile Master Analytics Data
+    # 3. Compile Master Analytics Data (using the resolved missing days)
     for file_name, d_packet in datasets.items():
         missing_weekdays_info = []
         if d_packet["dt_obj"]:
-            expected_weekdays = []
-            for i in range(7): 
-                curr = d_packet["dt_obj"] - timedelta(days=6-i)
-                if curr.weekday() < 5: expected_weekdays.append((str(curr.day), curr.strftime("%A")))
+            expected_weekdays = [(str((d_packet["dt_obj"] - timedelta(days=6-i)).day), (d_packet["dt_obj"] - timedelta(days=6-i)).strftime("%A")) for i in range(7) if (d_packet["dt_obj"] - timedelta(days=6-i)).weekday() < 5]
             extracted_dates = d_packet["df"]["Date Num"].replace("", pd.NA).dropna().unique().tolist()
             missing_weekdays_info = [d for d in expected_weekdays if d[0] not in extracted_dates]
             
@@ -331,10 +348,7 @@ if uploaded_files:
         if st.button(f"Generate PDF for {selected_file}", type="primary"):
             missing_weekdays_info = []
             if data_packet["dt_obj"]:
-                expected_weekdays = []
-                for i in range(7): 
-                    curr = data_packet["dt_obj"] - timedelta(days=6-i)
-                    if curr.weekday() < 5: expected_weekdays.append((str(curr.day), curr.strftime("%A")))
+                expected_weekdays = [(str((data_packet["dt_obj"] - timedelta(days=6-i)).day), (data_packet["dt_obj"] - timedelta(days=6-i)).strftime("%A")) for i in range(7) if (data_packet["dt_obj"] - timedelta(days=6-i)).weekday() < 5]
                 extracted_dates = edited_df["Date Num"].replace("", pd.NA).dropna().unique().tolist()
                 missing_weekdays_info = [d for d in expected_weekdays if d[0] not in extracted_dates]
                 
@@ -359,10 +373,7 @@ if uploaded_files:
                 for file_name, d_pack in datasets.items():
                     missing_weekdays_info = []
                     if d_pack["dt_obj"]:
-                        expected_weekdays = []
-                        for i in range(7): 
-                            curr = d_pack["dt_obj"] - timedelta(days=6-i)
-                            if curr.weekday() < 5: expected_weekdays.append((str(curr.day), curr.strftime("%A")))
+                        expected_weekdays = [(str((d_pack["dt_obj"] - timedelta(days=6-i)).day), (d_pack["dt_obj"] - timedelta(days=6-i)).strftime("%A")) for i in range(7) if (d_pack["dt_obj"] - timedelta(days=6-i)).weekday() < 5]
                         extracted_dates = d_pack["df"]["Date Num"].replace("", pd.NA).dropna().unique().tolist()
                         missing_weekdays_info = [d for d in expected_weekdays if d[0] not in extracted_dates]
 
