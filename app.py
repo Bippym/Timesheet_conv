@@ -524,18 +524,22 @@ if uploaded_files:
 
             st.dataframe(pd.DataFrame(payroll_data), use_container_width=True)
             
-            # --- ANNUAL EARNINGS PROJECTION ---
-            actual_weeks_uploaded = len(datasets)
+# --- ANNUAL EARNINGS PROJECTION ---
+            actual_weeks_uploaded = df_master['Week End'].nunique()
             if actual_weeks_uploaded > 0:
-                avg_weekly_gross = total_projected_gross / actual_weeks_uploaded
+                # Bypass the monthly ledger entirely to prevent month-spillover inflation.
+                # Calculate the exact true gross for ONLY the weeks uploaded.
+                true_total_gross = (total_base_hrs * rate) + (total_ot_hrs * (rate * 1.5)) + (total_dt_hrs * (rate * 2.0))
+                
+                avg_weekly_gross = true_total_gross / actual_weeks_uploaded
                 est_annual_gross = avg_weekly_gross * 52
                 
                 st.markdown("---")
                 st.markdown("### 📊 Annual Earnings Projection")
-                st.info("This projection averages the gross pay of the uploaded timesheets and extrapolates it across a full 52-week year.")
+                st.info("This projection isolates the exact true gross pay of the uploaded timesheets to find your true weekly average, then extrapolates it across a full 52-week year.")
                 
                 a1, a2, a3 = st.columns(3)
-                a1.metric("Avg. Weekly Gross", f"£{avg_weekly_gross:,.2f}")
+                a1.metric("Avg. True Weekly Gross", f"£{avg_weekly_gross:,.2f}")
                 a2.metric("Multiplier", "x 52 Weeks")
                 a3.metric("Est. Annual Gross", f"£{est_annual_gross:,.2f}")
 
