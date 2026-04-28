@@ -18,6 +18,9 @@ if "saved_service_5yr" not in st.session_state: st.session_state.saved_service_5
 if "resolutions" not in st.session_state: st.session_state.resolutions = {}
 if "selected_file_index" not in st.session_state: st.session_state.selected_file_index = 0
 
+# Standard columns to prevent KeyError
+TS_COLS = ["Date Num", "Site & Ref No.", "Began Journey", "Arrived On Site", "Left Site"]
+
 # --- UTILITIES ---
 def sync_json_to_state(data):
     st.session_state.saved_engineer = data.get("name", "")
@@ -47,7 +50,6 @@ def generate_pdf_html(df_processed, engineer, week_end_date, week_number, on_cal
         table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
         th, td {{ border: 1px solid #000; padding: 4px; text-align: center; }}
         th {{ background-color: #f2f2f2; font-size: 7pt; }}
-        .day-row {{ background-color: #ddd; font-weight: bold; text-align: left; padding-left: 10px; }}
     </style></head><body>
         <div class="header">
             <div><strong>Engineer:</strong> {engineer}<br>Network (Catering Engineers) Ltd</div>
@@ -59,26 +61,26 @@ def generate_pdf_html(df_processed, engineer, week_end_date, week_number, on_cal
             <tbody>
     """
     for row in df_processed:
-        if "site" in row:
-            tot = row.get('work', 0) + row.get('travel', 0)
-            html_content += f"<tr><td>{row['site']}</td><td>{row.get('began','')}</td><td>{row.get('arrived','')}</td><td>{row.get('left','')}</td><td>{row.get('work',0):.2f}</td><td>{row.get('travel',0):.2f}</td><td>{tot:.2f}</td></tr>"
+        tot = row.get('work', 0) + row.get('travel', 0)
+        html_content += f"<tr><td>{row.get('site','')}</td><td>{row.get('began','')}</td><td>{row.get('arrived','')}</td><td>{row.get('left','')}</td><td>{row.get('work',0):.2f}</td><td>{row.get('travel',0):.2f}</td><td>{tot:.2f}</td></tr>"
     html_content += "</tbody></table></body></html>"
     return html_content
 
 def process_timesheet_data(df, end_date_obj=None, missing_selections=None, contract_hours=40):
     processed_data = []
-    # Process existing rows
-    for _, row in df.iterrows():
-        dn, site, beg, arr, lft = str(row.get("Date Num","")), str(row.get("Site & Ref No.","")), str(row.get("Began Journey","")), str(row.get("Arrived On Site","")), str(row.get("Left Site",""))
-        work, travel = calc_hours(arr, lft), calc_hours(beg, arr)
-        f_date = ""
-        if end_date_obj and dn:
-            for i in range(7):
-                curr = end_date_obj - timedelta(days=6-i)
-                if str(curr.day) == dn:
-                    f_date = curr.strftime("%Y-%m-%d")
-                    break
-        processed_data.append({"date": dn, "full_date": f_date, "site": site, "began": beg, "arrived": arr, "left": lft, "work": work, "travel": travel})
+    if not df.empty:
+        for _, row in df.iterrows():
+            dn, site, beg, arr, lft = str(row.get("Date Num","")), str(row.get("Site & Ref No.","")), str(row.get("Began Journey","")), str(row.get("Arrived On Site","")), str(row.get("Left Site",""))
+            if not beg and not arr and not lft: continue
+            work, travel = calc_hours(arr, lft), calc_hours(beg, arr)
+            f_date = ""
+            if end_date_obj and dn:
+                for i in range(7):
+                    curr = end_date_obj - timedelta(days=6-i)
+                    if str(curr.day) == dn:
+                        f_date = curr.strftime("%Y-%m-%d")
+                        break
+            processed_data.append({"date": dn, "full_date": f_date, "site": site, "began": beg, "arrived": arr, "left": lft, "work": work, "travel": travel})
     
     if missing_selections:
         daily = contract_hours / 5.0
@@ -118,7 +120,7 @@ uploaded_pdfs = st.file_uploader("Upload PDF Timesheets", type=["pdf"], accept_m
 all_uploads = {}
 global_missing_files = []
 
-# Logic to handle ref date
+# Reference date for triangulation
 ref_dt, ref_wk = None, None
 if uploaded_pdfs:
     for f in uploaded_pdfs:
@@ -151,27 +153,30 @@ if uploaded_pdfs:
             fm = re.search(r"[Ww]eek[_\s]*(\d+)", f.name)
             wk = fm.group(1) if fm else ""
         if not we and wk and ref_dt and ref_wk:
-            we = (ref_dt + timedelta(weeks=int(wk) - ref_wk)).strftime("%d %b %Y")
+            try: we = (ref_dt + timedelta(weeks=int(wk) - ref_wk)).strftime("%d %b %Y")
+            except: pass
 
         dt_obj = None
         try: dt_obj = datetime.strptime(we, "%d %b %Y")
         except: pass
         
-        # Determine if this file needs resolution (and hasn't been fixed in session)
-        needs_res = False
+        # Ensure correct column headers even for blank files
+        df_file = pd.DataFrame(rows)
+        if df_file.empty:
+            df_file = pd.DataFrame(columns=TS_COLS)
+
         if dt_obj:
             expected = [str((dt_obj - timedelta(days=6-i)).day) for i in range(7) if (dt_obj - timedelta(days=6-i)).weekday() < 5]
-            found = [str(x["Date Num"]) for x in rows if x["Date Num"]]
+            found = df_file["Date Num"].unique().tolist() if "Date Num" in df_file.columns else []
             unresolved = [d for d in expected if d not in found]
-            if (unresolved or not rows) and f.name not in st.session_state.resolutions:
-                needs_res = True
+            if (unresolved or rows == []) and f.name not in st.session_state.resolutions:
                 global_missing_files.append({"name": f.name, "we": we, "index": idx})
 
-        all_uploads[f.name] = {"we": we, "wk": wk, "dt_obj": dt_obj, "df": pd.DataFrame(rows), "idx": idx}
+        all_uploads[f.name] = {"we": we, "wk": wk, "dt_obj": dt_obj, "df": df_file, "idx": idx}
 
-# --- GLOBAL ALERT WITH QUICK-JUMP BUTTONS ---
+# --- GLOBAL ALERT ---
 if global_missing_files:
-    st.error("🚨 **Action Required!** The following files have missing days. Click a button to resolve:")
+    st.error("🚨 **Action Required!** Missing days in some files. Click to resolve:")
     cols = st.columns(len(global_missing_files))
     for i, file_info in enumerate(global_missing_files):
         if cols[i].button(f"🛠️ Fix {file_info['name']}", key=f"jump_{file_info['name']}"):
@@ -202,7 +207,7 @@ with t1:
                     day_label = f"{curr.strftime('%A')} {curr.day}{get_suffix(curr.day)} {curr.strftime('%B %Y')}"
                     expected_days.append((str(curr.day), day_label))
 
-            found = up["df"]["Date Num"].unique().tolist()
+            found = up["df"]["Date Num"].unique().tolist() if "Date Num" in up["df"].columns else []
             missing = [d for d in expected_days if d[0] not in found]
             
             if missing or up["df"].empty:
@@ -218,15 +223,14 @@ with t1:
                 
                 if st.button("✅ Save Resolution for this Week"):
                     st.session_state.resolutions[sel_name] = m_sel
-                    st.success("Resolved! You can now sync this week.")
+                    st.success("Resolved!")
                     st.rerun()
 
-        edited_df = st.data_editor(up["df"], num_rows="dynamic", use_container_width=True, key=f"ed_{sel_name}")
+        st.data_editor(up["df"], num_rows="dynamic", use_container_width=True, key=f"ed_{sel_name}")
         
-        # PDF GENERATION BUTTON
         if st.button("🖨️ Generate & Download Resolved PDF"):
             res = st.session_state.resolutions.get(sel_name, {})
-            proc = process_timesheet_data(edited_df, end_dt, res, st.session_state.saved_contract)
+            proc = process_timesheet_data(up["df"], end_dt, res, st.session_state.saved_contract)
             html = generate_pdf_html(proc, st.session_state.saved_engineer, f_we, f_wk, "Yes")
             st.download_button("⬇️ Download PDF", HTML(string=html).write_pdf(), file_name=f"{sel_name}.pdf")
 
