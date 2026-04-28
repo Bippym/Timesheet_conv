@@ -7,26 +7,33 @@ import re
 import plotly.express as px
 import zipfile
 import io
+import json
 
 st.set_page_config(page_title="Network Timesheet Dashboard", layout="wide")
 
-# --- SESSION STATE ---
+# --- SESSION STATE & DATABASE INIT ---
 if "saved_contract" not in st.session_state: st.session_state.saved_contract = 40
 if "saved_rate" not in st.session_state: st.session_state.saved_rate = 0.00
 if "saved_engineer" not in st.session_state: st.session_state.saved_engineer = "UNKNOWN ENGINEER"
 if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0 
+if "last_uploaded_db" not in st.session_state: st.session_state.last_uploaded_db = None
+
+# Core Local Database
+if "user_db" not in st.session_state:
+    st.session_state.user_db = {"weeks": {}}
 
 # --- SIDEBAR & DELETE FUNCTION ---
 with st.sidebar:
     st.header("⚙️ Advanced Settings")
-    if st.button("🗑️ Delete All Loaded Timesheets", type="primary"):
+    if st.button("🗑️ Clear Uploaded PDFs", type="primary"):
         st.session_state.uploader_key += 1
         st.rerun()
+    st.info("Note: Clearing PDFs does NOT delete your saved history in Tab 4.")
     st.markdown("---")
     debug_mode = st.checkbox("Enable Developer Debug Mode")
 
 st.title("Network (Catering Engineers) Ltd - Timesheet Portal")
-st.markdown("Upload multiple timesheets to process PDFs, view analytics, and project salary arrears.")
+st.markdown("Upload multiple timesheets to process PDFs, view analytics, and manage your personal database.")
 
 # --- CORE FUNCTIONS ---
 def fix_time_string(current_time, previous_time):
@@ -165,16 +172,16 @@ def generate_pdf_html(df_processed, engineer, week_end_date, week_number, on_cal
 # --- MULTI-FILE EXTRACTION ROUTINE ---
 uploaded_files = st.file_uploader("Upload Work-Style Timesheets (PDF)", type=["pdf"], accept_multiple_files=True, key=f"uploader_{st.session_state.uploader_key}")
 
+c1, c2 = st.columns(2)
+def update_eng(): st.session_state.saved_engineer = st.session_state.eng_input
+def update_con(): st.session_state.saved_contract = st.session_state.con_input
+with c1: final_engineer = st.text_input("Engineer Name (Global)", value=st.session_state.saved_engineer, key="eng_input", on_change=update_eng)
+with c2: contract_hours = st.selectbox("Contracted Hours", options=[40, 45], index=0 if st.session_state.saved_contract == 40 else 1, key="con_input", on_change=update_con)
+
+datasets = {}
+master_analytics_data = []
+
 if uploaded_files:
-    c1, c2 = st.columns(2)
-    def update_eng(): st.session_state.saved_engineer = st.session_state.eng_input
-    def update_con(): st.session_state.saved_contract = st.session_state.con_input
-    with c1: final_engineer = st.text_input("Engineer Name (Global)", value=st.session_state.saved_engineer, key="eng_input", on_change=update_eng)
-    with c2: contract_hours = st.selectbox("Contracted Hours", options=[40, 45], index=0 if st.session_state.saved_contract == 40 else 1, key="con_input", on_change=update_con)
-    
-    datasets = {}
-    master_analytics_data = []
-    
     with st.spinner("Processing all uploaded timesheets..."):
         for uploaded_file in uploaded_files:
             extracted_data = []
@@ -253,12 +260,10 @@ if uploaded_files:
             guessed_wk = d_packet["week_number"]
             guessed_we = d_packet["week_ending"]
             
-            # Smart Filename Parsing
             if not guessed_wk or guessed_wk == "Unknown":
                 fm = re.search(r"[Ww](?:eek)?[_\s]*(\d{1,2})", file_name)
                 if fm: guessed_wk = fm.group(1)
                 
-            # Date Triangulation (using timedelta from a valid uploaded sheet)
             if guessed_wk and guessed_wk.isdigit() and (not guessed_we or guessed_we == ""):
                 ref_dt, ref_wk = None, None
                 for other_pack in datasets.values():
@@ -302,7 +307,7 @@ if uploaded_files:
                 
     if not any_missing: st.success("No missing weekdays detected across all uploaded files. Ready to generate!")
 
-    # 3. Compile Master Analytics Data
+    # Compile Master Analytics Data
     for file_name, d_packet in datasets.items():
         missing_weekdays_info = []
         if d_packet["dt_obj"]:
@@ -312,16 +317,19 @@ if uploaded_files:
             
         temp_processed = process_timesheet_data(d_packet["df"], d_packet["dt_obj"], missing_weekdays_info, d_packet["missing_selections"], contract_hours)
         for row in temp_processed:
-            row["Week End"], row["Month"], row["File"] = d_packet["week_ending"], d_packet["month_label"], file_name
+            row["Week End"], row["Week No"], row["Month"], row["File"] = d_packet["week_ending"], d_packet["week_number"], d_packet["month_label"], file_name
             master_analytics_data.append(row)
 
-    df_master = pd.DataFrame(master_analytics_data)
+df_master = pd.DataFrame(master_analytics_data)
 
-    # --- TABBED INTERFACE ---
-    tab1, tab2, tab3 = st.tabs(["📑 Individual Editor & Batch Export", "📈 Master Analytics", "💷 Salary & Arrears Breakdown"])
+# --- TABBED INTERFACE ---
+tab1, tab2, tab3, tab4 = st.tabs(["📑 Individual Editor & Batch Export", "📈 PDF Analytics", "💷 Salary & Arrears Breakdown", "💾 Database & Profile"])
 
-    # --- TAB 1: GENERATION ---
-    with tab1:
+# --- TAB 1: GENERATION ---
+with tab1:
+    if not datasets:
+        st.info("Upload Timesheet PDFs to use the Editor and Batch Exporter.")
+    else:
         st.markdown("### 1️⃣ Single Timesheet Preview")
         selected_file = st.selectbox("Select timesheet to preview:", list(datasets.keys()))
         data_packet = datasets[selected_file]
@@ -371,9 +379,12 @@ if uploaded_files:
             
             st.download_button(label="📦 Download ALL Timesheets as ZIP", data=zip_buffer.getvalue(), file_name="Network_Timesheets_Batch.zip", mime="application/zip")
 
-    # --- TAB 2: ANALYTICS ---
-    with tab2:
-        st.markdown("### 🎛️ Analytics Filter")
+# --- TAB 2: ANALYTICS ---
+with tab2:
+    st.markdown("### 🎛️ PDF Analytics Filter")
+    if df_master.empty:
+        st.warning("Upload Timesheets to view Analytics.")
+    else:
         f1, f2 = st.columns([1, 2])
         with f1: filter_type = st.radio("Time Period", ["All Time", "By Month", "By Week"])
         with f2:
@@ -387,105 +398,80 @@ if uploaded_files:
                 df_filtered = df_master[df_master["Week End"] == sel_filter]
             else: df_filtered = df_master
 
-        if df_filtered.empty: st.warning("No data available for the selected period.")
-        else:
-            st.markdown("---")
-            st.markdown("### 📈 Averages & Key Metrics")
-            m1, m2, m3, m4 = st.columns(4)
-            
-            total_work_global = df_filtered['work'].sum()
-            total_travel_global = df_filtered['travel'].sum()
-            total_overall_global = total_work_global + total_travel_global
-            
-            unique_weeks = df_filtered['Week End'].nunique()
-            unique_months = df_filtered['Month'].nunique()
-            unique_days = df_filtered.groupby(['Week End', 'date']).ngroups
-            
-            avg_hrs_week = total_overall_global / unique_weeks if unique_weeks > 0 else 0
-            avg_hrs_month = total_overall_global / unique_months if unique_months > 0 else 0
-            avg_travel_day = total_travel_global / unique_days if unique_days > 0 else 0
-            avg_work_day = total_work_global / unique_days if unique_days > 0 else 0
-            
-            m1.metric("Avg Hours per Week", f"{avg_hrs_week:.2f} hrs")
-            m2.metric("Avg Hours per Month", f"{avg_hrs_month:.2f} hrs")
-            m3.metric("Avg Travel per Day", f"{avg_travel_day:.2f} hrs")
-            m4.metric("Avg On-Site per Day", f"{avg_work_day:.2f} hrs")
-
-            st.markdown("---")
-            c1, c2 = st.columns(2)
-            with c1:
-                if total_overall_global > 0:
-                    pie_overall = pd.DataFrame({"Category": ["On-Site Work", "Travel Time"], "Hours": [total_work_global, total_travel_global]})
-                    fig1 = px.pie(pie_overall, values='Hours', names='Category', hole=0.4, title="Overall Time: Work vs Travel", color_discrete_sequence=['#2e7b32', '#1976d2'])
-                    fig1.update_traces(textposition='inside', textinfo='percent+label')
-                    st.plotly_chart(fig1, use_container_width=True)
-
-            with c2:
-                prod_hours = df_filtered[df_filtered['productivity'] == 'Productive Work']['work'].sum()
-                non_prod_hours = df_filtered[df_filtered['productivity'] == 'Non-Productive Work']['work'].sum()
-                if prod_hours + non_prod_hours > 0:
-                    pie_prod = pd.DataFrame({"Category": ["Productive Work", "Non-Productive Work"], "Hours": [prod_hours, non_prod_hours]})
-                    fig2 = px.pie(pie_prod, values='Hours', names='Category', hole=0.4, title="Productivity Split (On-Site Hours)", color_discrete_sequence=['#ff9800', '#757575'])
-                    fig2.update_traces(textposition='inside', textinfo='percent+label')
-                    st.plotly_chart(fig2, use_container_width=True)
-
- # --- TAB 3: SALARY & ARREARS ---
-    with tab3:
-        st.markdown("### 💷 Annual Salary & Arrears Breakdown")
-        st.info("In the UK, Basic Pay is calculated annually and paid in 12 equal monthly installments. Overtime and Double-Time are calculated per-week, and paid a month in arrears (e.g., March's overtime is paid in April).")
-
-        p1, p2 = st.columns(2)
-        def update_rate_tab3(): st.session_state.saved_rate = st.session_state.rate_input_tab3
-        with p1: rate = st.number_input("Global Hourly Rate (£)", value=st.session_state.saved_rate, step=0.50, format="%.2f", key="rate_input_tab3", on_change=update_rate_tab3)
+        st.markdown("---")
+        st.markdown("### 📈 Averages & Key Metrics")
+        m1, m2, m3, m4 = st.columns(4)
         
-        annual_basic = rate * contract_hours * 52
-        monthly_basic = annual_basic / 12
+        total_work_global = df_filtered['work'].sum()
+        total_travel_global = df_filtered['travel'].sum()
+        total_overall_global = total_work_global + total_travel_global
         
-        st.markdown(f"**Annual Basic Pay:** £{annual_basic:,.2f} | **Monthly Basic Pay:** £{monthly_basic:,.2f}")
+        unique_weeks = df_filtered['Week End'].nunique()
+        unique_months = df_filtered['Month'].nunique()
+        unique_days = df_filtered.groupby(['Week End', 'date']).ngroups
+        
+        avg_hrs_week = total_overall_global / unique_weeks if unique_weeks > 0 else 0
+        avg_hrs_month = total_overall_global / unique_months if unique_months > 0 else 0
+        avg_travel_day = total_travel_global / unique_days if unique_days > 0 else 0
+        avg_work_day = total_work_global / unique_days if unique_days > 0 else 0
+        
+        m1.metric("Avg Hours per Week", f"{avg_hrs_week:.2f} hrs")
+        m2.metric("Avg Hours per Month", f"{avg_hrs_month:.2f} hrs")
+        m3.metric("Avg Travel per Day", f"{avg_travel_day:.2f} hrs")
+        m4.metric("Avg On-Site per Day", f"{avg_work_day:.2f} hrs")
 
-        if df_master.empty:
-            st.warning("Upload timesheets to see your salary and arrears projections.")
-        else:
-            st.markdown("---")
-            all_dt_strs = df_master["Week End"].unique()
-            bh_options = []
-            for we_str in all_dt_strs:
-                try:
-                    dt_obj = datetime.strptime(we_str, "%d %b %Y")
-                    for i in range(7):
-                        curr = dt_obj - timedelta(days=6-i)
-                        bh_options.append(f"{curr.strftime('%A')} {curr.day} ({we_str})")
-                except: pass
-            
-            bank_holidays_raw = st.multiselect("Select Bank Holidays for Double-Time Calculation:", options=list(set(bh_options)), key="bh_tab3")
-            bank_holidays = [b.split(" ")[1] for b in bank_holidays_raw]
+        st.markdown("---")
+        c1, c2 = st.columns(2)
+        with c1:
+            if total_overall_global > 0:
+                pie_overall = pd.DataFrame({"Category": ["On-Site Work", "Travel Time"], "Hours": [total_work_global, total_travel_global]})
+                fig1 = px.pie(pie_overall, values='Hours', names='Category', hole=0.4, title="Overall Time: Work vs Travel", color_discrete_sequence=['#2e7b32', '#1976d2'])
+                fig1.update_traces(textposition='inside', textinfo='percent+label')
+                st.plotly_chart(fig1, use_container_width=True)
 
-            # PAYROLL LEDGER ENGINE
-            payroll_ledger = {}
-            
-            # --- Variables for Annual Extrapolator ---
-            total_base_hrs = 0.0
-            total_ot_hrs = 0.0
-            total_dt_hrs = 0.0
+        with c2:
+            prod_hours = df_filtered[df_filtered['productivity'] == 'Productive Work']['work'].sum()
+            non_prod_hours = df_filtered[df_filtered['productivity'] == 'Non-Productive Work']['work'].sum()
+            if prod_hours + non_prod_hours > 0:
+                pie_prod = pd.DataFrame({"Category": ["Productive Work", "Non-Productive Work"], "Hours": [prod_hours, non_prod_hours]})
+                fig2 = px.pie(pie_prod, values='Hours', names='Category', hole=0.4, title="Productivity Split (On-Site Hours)", color_discrete_sequence=['#ff9800', '#757575'])
+                fig2.update_traces(textposition='inside', textinfo='percent+label')
+                st.plotly_chart(fig2, use_container_width=True)
 
+# --- TAB 3: SALARY & ARREARS ---
+with tab3:
+    st.markdown("### 💷 Annual Salary & Arrears Breakdown")
+    st.info("In the UK, Basic Pay is calculated annually and paid in 12 equal monthly installments. Overtime and Double-Time are calculated per-week, and paid a month in arrears. This table pulls from your saved Personal Database in Tab 4.")
+
+    p1, p2 = st.columns(2)
+    def update_rate_tab3(): st.session_state.saved_rate = st.session_state.rate_input_tab3
+    with p1: rate = st.number_input("Global Hourly Rate (£)", value=st.session_state.saved_rate, step=0.50, format="%.2f", key="rate_input_tab3", on_change=update_rate_tab3)
+    
+    annual_basic = rate * contract_hours * 52
+    monthly_basic = annual_basic / 12
+    
+    st.markdown(f"**Annual Basic Pay:** £{annual_basic:,.2f} | **Monthly Basic Pay:** £{monthly_basic:,.2f}")
+
+    if not df_master.empty:
+        st.markdown("---")
+        st.markdown("#### 📥 Push New PDFs to Database")
+        all_dt_strs = df_master["Week End"].unique()
+        bh_options = []
+        for we_str in all_dt_strs:
+            try:
+                dt_obj = datetime.strptime(we_str, "%d %b %Y")
+                for i in range(7):
+                    curr = dt_obj - timedelta(days=6-i)
+                    bh_options.append(f"{curr.strftime('%A')} {curr.day} ({we_str})")
+            except: pass
+        
+        bank_holidays_raw = st.multiselect("Select Bank Holidays in CURRENT uploads (Pays 2x):", options=list(set(bh_options)), key="bh_tab3")
+        bank_holidays = [b.split(" ")[1] for b in bank_holidays_raw]
+
+        if st.button("Calculate Current PDFs & Save to Database", type="primary"):
             for week_str, week_group in df_master.groupby("Week End"):
-                try:
-                    week_dt_obj = datetime.strptime(week_str, "%d %b %Y")
-                    worked_month_key = week_dt_obj.strftime("%Y-%m")
-                    worked_month_label = week_dt_obj.strftime("%B %Y")
-
-                    # Shift payment month forward by 1 for arrears logic
-                    if week_dt_obj.month == 12: payment_month_dt = week_dt_obj.replace(year=week_dt_obj.year+1, month=1, day=1)
-                    else: payment_month_dt = week_dt_obj.replace(month=week_dt_obj.month+1, day=1)
-
-                    payment_month_key = payment_month_dt.strftime("%Y-%m")
-                    payment_month_label = payment_month_dt.strftime("%B %Y")
-                except: continue
-
-                if worked_month_key not in payroll_ledger: payroll_ledger[worked_month_key] = {"label": worked_month_label, "basic_count": 0, "ot_hrs": 0.0, "dt_hrs": 0.0}
-                if payment_month_key not in payroll_ledger: payroll_ledger[payment_month_key] = {"label": payment_month_label, "basic_count": 0, "ot_hrs": 0.0, "dt_hrs": 0.0}
-
                 week_std_hrs, week_dt_hrs = 0.0, 0.0
+                leave_days = []
                 for _, row in week_group.iterrows():
                     day_total = float(row['work']) + float(row['travel'])
                     is_dt = False
@@ -500,58 +486,153 @@ if uploaded_files:
                     
                     if is_dt: week_dt_hrs += day_total
                     else: week_std_hrs += day_total
+                    
+                    s_upper = str(row['site']).upper()
+                    if "ANNUAL LEAVE" in s_upper or "SICK" in s_upper or "UNPAID LEAVE" in s_upper:
+                        leave_days.append(f"{row['date']} ({row['site']})")
 
                 week_base = min(week_std_hrs, contract_hours)
                 week_ot = max(0, week_std_hrs - contract_hours)
                 
-                # --- Track totals for Annual Extrapolator ---
-                total_base_hrs += week_base
-                total_ot_hrs += week_ot
-                total_dt_hrs += week_dt_hrs
+                # Push permanently into Database
+                st.session_state.user_db["weeks"][week_str] = {
+                    "Week No": str(week_group["Week No"].iloc[0]),
+                    "Standard": week_base,
+                    "Overtime": week_ot,
+                    "Double Time": week_dt_hrs,
+                    "Leave Days": ", ".join(leave_days)
+                }
+            st.success("Uploaded timesheets processed and saved to your Personal Database!")
 
-                payroll_ledger[worked_month_key]["basic_count"] += 1
-                payroll_ledger[payment_month_key]["ot_hrs"] += week_ot
-                payroll_ledger[payment_month_key]["dt_hrs"] += week_dt_hrs
+    # Build Ledger from User Database (Not just current PDFs)
+    if not st.session_state.user_db["weeks"]:
+        st.warning("Your database is empty. Upload timesheets and push them to the database, or load a previous database file in Tab 4.")
+    else:
+        st.markdown("---")
+        st.markdown("#### 📅 Master Arrears Ledger")
+        payroll_ledger = {}
+        total_base_hrs, total_ot_hrs, total_dt_hrs = 0.0, 0.0, 0.0
 
-            payroll_data = []
+        for week_str, week_data in st.session_state.user_db["weeks"].items():
+            try:
+                week_dt_obj = datetime.strptime(week_str, "%d %b %Y")
+                worked_month_key = week_dt_obj.strftime("%Y-%m")
+                worked_month_label = week_dt_obj.strftime("%B %Y")
+                if week_dt_obj.month == 12: payment_month_dt = week_dt_obj.replace(year=week_dt_obj.year+1, month=1, day=1)
+                else: payment_month_dt = week_dt_obj.replace(month=week_dt_obj.month+1, day=1)
+                payment_month_key = payment_month_dt.strftime("%Y-%m")
+                payment_month_label = payment_month_dt.strftime("%B %Y")
+            except: continue
+
+            if worked_month_key not in payroll_ledger: payroll_ledger[worked_month_key] = {"label": worked_month_label, "basic_count": 0, "ot_hrs": 0.0, "dt_hrs": 0.0}
+            if payment_month_key not in payroll_ledger: payroll_ledger[payment_month_key] = {"label": payment_month_label, "basic_count": 0, "ot_hrs": 0.0, "dt_hrs": 0.0}
+
+            total_base_hrs += week_data.get("Standard", 0.0)
+            total_ot_hrs += week_data.get("Overtime", 0.0)
+            total_dt_hrs += week_data.get("Double Time", 0.0)
+
+            payroll_ledger[worked_month_key]["basic_count"] += 1
+            payroll_ledger[payment_month_key]["ot_hrs"] += week_data.get("Overtime", 0.0)
+            payroll_ledger[payment_month_key]["dt_hrs"] += week_data.get("Double Time", 0.0)
+
+        payroll_data = []
+        for m_key in sorted(payroll_ledger.keys()):
+            m_data = payroll_ledger[m_key]
+            basic_pay = monthly_basic if m_data["basic_count"] > 0 else 0.0
+            ot_pay = m_data["ot_hrs"] * (rate * 1.5)
+            dt_pay = m_data["dt_hrs"] * (rate * 2.0)
+            gross = basic_pay + ot_pay + dt_pay
             
-            for m_key in sorted(payroll_ledger.keys()):
-                m_data = payroll_ledger[m_key]
-                basic_pay = monthly_basic if m_data["basic_count"] > 0 else 0.0
-                ot_pay = m_data["ot_hrs"] * (rate * 1.5)
-                dt_pay = m_data["dt_hrs"] * (rate * 2.0)
-                gross = basic_pay + ot_pay + dt_pay
+            payroll_data.append({
+                "Payroll Month": m_data["label"],
+                "Basic Pay (£)": f"£{basic_pay:,.2f}",
+                "Arrears OT (Hrs)": f"{m_data['ot_hrs']:.2f}",
+                "Arrears OT Pay (£)": f"£{ot_pay:,.2f}",
+                "Arrears DT (Hrs)": f"{m_data['dt_hrs']:.2f}",
+                "Arrears DT Pay (£)": f"£{dt_pay:,.2f}",
+                "Gross Pay (£)": f"£{gross:,.2f}"
+            })
 
-                payroll_data.append({
-                    "Payroll Month": m_data["label"],
-                    "Basic Pay (£)": f"£{basic_pay:,.2f}",
-                    "Arrears OT (Hrs)": f"{m_data['ot_hrs']:.2f}",
-                    "Arrears OT Pay (£)": f"£{ot_pay:,.2f}",
-                    "Arrears DT (Hrs)": f"{m_data['dt_hrs']:.2f}",
-                    "Arrears DT Pay (£)": f"£{dt_pay:,.2f}",
-                    "Gross Pay (£)": f"£{gross:,.2f}"
-                })
-
-            st.dataframe(pd.DataFrame(payroll_data), use_container_width=True)
+        st.dataframe(pd.DataFrame(payroll_data), use_container_width=True)
+        
+        # --- ANNUAL EARNINGS PROJECTION ---
+        actual_weeks_in_db = len(st.session_state.user_db["weeks"])
+        if actual_weeks_in_db > 0:
+            true_total_gross = (total_base_hrs * rate) + (total_ot_hrs * (rate * 1.5)) + (total_dt_hrs * (rate * 2.0))
+            avg_weekly_gross = true_total_gross / actual_weeks_in_db
+            est_annual_gross = avg_weekly_gross * 52
             
-            # --- ANNUAL EARNINGS PROJECTION ---
-            actual_weeks_uploaded = df_master['Week End'].nunique()
-            if actual_weeks_uploaded > 0:
-                # Bypass the monthly ledger entirely to prevent month-spillover inflation.
-                # Calculate the exact true gross for ONLY the weeks uploaded.
-                true_total_gross = (total_base_hrs * rate) + (total_ot_hrs * (rate * 1.5)) + (total_dt_hrs * (rate * 2.0))
-                
-                avg_weekly_gross = true_total_gross / actual_weeks_uploaded
-                est_annual_gross = avg_weekly_gross * 52
-                
-                st.markdown("---")
-                st.markdown("### 📊 Annual Earnings Projection")
-                st.info("This projection isolates the exact true gross pay of the uploaded timesheets to find your true weekly average, then extrapolates it across a full 52-week year.")
-                
-                a1, a2, a3 = st.columns(3)
-                a1.metric("Avg. True Weekly Gross", f"£{avg_weekly_gross:,.2f}")
-                a2.metric("Multiplier", "x 52 Weeks")
-                a3.metric("Est. Annual Gross", f"£{est_annual_gross:,.2f}")
+            st.markdown("---")
+            st.markdown("### 📊 Annual Earnings Projection")
+            st.info("This projection isolates the exact true gross pay stored in your database to find your true weekly average, then extrapolates it across a full 52-week year.")
+            
+            a1, a2, a3 = st.columns(3)
+            a1.metric("Avg. True Weekly Gross", f"£{avg_weekly_gross:,.2f}")
+            a2.metric("Multiplier", "x 52 Weeks")
+            a3.metric("Est. Annual Gross", f"£{est_annual_gross:,.2f}")
+
+# --- TAB 4: DATABASE MANAGER ---
+with tab4:
+    st.markdown("### 💾 Personal Database Manager")
+    st.info("This is your permanent, offline record. You can edit errors, delete old weeks, and export your entire profile as a `.json` backup.")
+
+    db_file = st.file_uploader("📂 Load Existing Database (.json)", type=["json"])
+    if db_file is not None and st.session_state.last_uploaded_db != db_file.name:
+        try:
+            data = json.load(db_file)
+            st.session_state.saved_engineer = data.get("name", st.session_state.saved_engineer)
+            st.session_state.saved_rate = data.get("rate", st.session_state.saved_rate)
+            st.session_state.saved_contract = data.get("contract", st.session_state.saved_contract)
+            st.session_state.user_db["weeks"] = data.get("weeks", {})
+            st.session_state.last_uploaded_db = db_file.name
+            st.success("Database loaded successfully!")
+            st.rerun()
+        except: st.error("Invalid database file. Make sure it is a previously exported .json file.")
+
+    st.markdown("---")
+    st.markdown("#### Edit Historical Records")
+    
+    db_df = pd.DataFrame.from_dict(st.session_state.user_db["weeks"], orient="index")
+    if not db_df.empty:
+        db_df.reset_index(inplace=True)
+        db_df.rename(columns={"index": "Week End Date"}, inplace=True)
+        
+        # Display the interactive editor
+        edited_db = st.data_editor(db_df, num_rows="dynamic", use_container_width=True)
+        
+        if st.button("💾 Save Edits to Memory"):
+            new_weeks = {}
+            for _, row in edited_db.iterrows():
+                we_date = str(row.get("Week End Date", ""))
+                if we_date and we_date != "nan" and we_date != "None":
+                    new_weeks[we_date] = {
+                        "Week No": str(row.get("Week No", "")),
+                        "Standard": float(row.get("Standard", 0.0)),
+                        "Overtime": float(row.get("Overtime", 0.0)),
+                        "Double Time": float(row.get("Double Time", 0.0)),
+                        "Leave Days": str(row.get("Leave Days", ""))
+                    }
+            st.session_state.user_db["weeks"] = new_weeks
+            st.success("Memory updated! Go to Tab 3 to see the adjusted Salary projections.")
+
+        st.markdown("---")
+        # --- EXPORT ROUTINE ---
+        export_data = {
+            "name": st.session_state.saved_engineer,
+            "rate": st.session_state.saved_rate,
+            "contract": st.session_state.saved_contract,
+            "weeks": st.session_state.user_db["weeks"]
+        }
+        json_str = json.dumps(export_data, indent=4)
+        st.download_button(
+            label="📦 Download Local Backup (.json)", 
+            data=json_str, 
+            file_name=f"{st.session_state.saved_engineer.replace(' ', '_')}_Profile_DB.json", 
+            mime="application/json",
+            type="primary"
+        )
+    else:
+        st.info("Your database is currently empty. Upload PDFs and save them in Tab 3, or upload an existing .json database file.")
 
     if debug_mode:
         st.markdown("---")
