@@ -31,6 +31,7 @@ if uploaded_file is not None:
     extracted_data = []
     week_ending_str = ""
     week_number = "18"
+    engineer_name = "UNKNOWN ENGINEER"
     raw_text_dump = ""
     
     with st.spinner("Extracting data from PDF..."):
@@ -39,17 +40,24 @@ if uploaded_file is not None:
                 text = page.extract_text()
                 if text: raw_text_dump += text + "\n\n---PAGE BREAK---\n\n"
                 
+                # Extract Header Info
                 if "Week Ending:" in text:
                     match = re.search(r"Week Ending:\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})", text)
                     if match: week_ending_str = match.group(1)
                 if "Week:" in text:
                     match = re.search(r"Week:\s*(\d+)", text)
                     if match: week_number = match.group(1)
+                if "Engineer:" in text:
+                    # Dynamically extract the engineer's name, ignoring titles like (MGR)
+                    match = re.search(r"Engineer:\s*([A-Za-z\s]+)", text)
+                    if match:
+                        eng_str = match.group(1).strip()
+                        eng_str = re.split(r"(Week|Date|Network)", eng_str)[0].strip()
+                        if eng_str: engineer_name = eng_str
 
                 for line in text.split('\n'):
                     times = re.findall(r'\b\d{1,2}:\d{2}\b', line)
                     
-                    # Lowered threshold: Catch the row even if only 1 time survives PDF corruption
                     if len(times) >= 1: 
                         first_time_idx = line.find(times[0])
                         raw_site = line[:first_time_idx].strip()
@@ -64,11 +72,11 @@ if uploaded_file is not None:
                         if len(times) >= 3:
                             began, arrived, left = times[0], times[1], times[2]
                         elif len(times) == 2:
-                            if "HOME" in site_clean.upper(): began, arrived, left = times[0], times[1], ""
-                            else: began, arrived, left = "", times[0], times[1]
+                            if "HOME" in site_clean.upper() or "BREAK" in site_clean.upper(): 
+                                began, arrived, left = times[0], times[1], ""
+                            else: 
+                                began, arrived, left = "", times[0], times[1]
                         else:
-                            # Only 1 time found. Placed in 'Arrived' so the row isn't lost. 
-                            # User can manually fill the missing times in the app table!
                             began, arrived, left = "", times[0], ""
                         
                         extracted_data.append({
@@ -86,9 +94,12 @@ if uploaded_file is not None:
 
     if extracted_data:
         st.success("Data extracted! Double check for any missing times caused by PDF formatting glitches before generating.")
-        col1, col2 = st.columns(2)
+        
+        # Added Engineer Name to the editable headers
+        col1, col2, col3 = st.columns(3)
         with col1: final_date = st.text_input("Week End Date", value=week_ending_str)
         with col2: final_week = st.text_input("Week Number", value=week_number)
+        with col3: final_engineer = st.text_input("Engineer Name", value=engineer_name)
             
         df = pd.DataFrame(extracted_data)
         df = df[["Date Num", "Site & Ref No.", "Began Journey", "Arrived On Site", "Left Site", "Original Row Info"]]
@@ -97,6 +108,7 @@ if uploaded_file is not None:
         if st.button("Apply Rules & Generate PDF", type="primary"):
             processed_data = []
             has_weekend = False
+            pending_break_mins = 0
             
             for raw_info in df["Original Row Info"].astype(str):
                 if re.match(r"^[S]\s*\d{1,2}", raw_info): has_weekend = True
@@ -104,13 +116,42 @@ if uploaded_file is not None:
             on_call_status = "Yes" if has_weekend else "No"
             
             for index, row in edited_df.iterrows():
-                date_num, site, arrived, left, began = str(row["Date Num"]), str(row["Site & Ref No."]), str(row["Arrived On Site"]), str(row["Left Site"]), str(row["Began Journey"])
+                date_num, site, arrived, left, began, raw_info = str(row["Date Num"]), str(row["Site & Ref No."]), str(row["Arrived On Site"]), str(row["Left Site"]), str(row["Began Journey"]), str(row["Original Row Info"])
                 
-                if began == "" and index > 0: 
+                # --- NEW BREAK HANDLER ---
+                if "BREAK" in site.upper():
+                    # Find duration of break. Usually between 'Arrived' and 'Left' on a break row.
+                    b_mins = round(calc_hours(arrived, left) * 60)
+                    if b_mins == 0: b_mins = round(calc_hours(began, left) * 60) # Fallback
+                    if b_mins == 0: b_mins = round(calc_hours(began, arrived) * 60) # Fallback
+                    
+                    pending_break_mins += b_mins
+                    continue # Skip appending this row to the final PDF!
+
+                # --- CONTINUITY RULE (Now respects skipped breaks) ---
+                if (began == "" or pending_break_mins > 0) and len(processed_data) > 0: 
                     began = processed_data[-1]["left"]
                     
                 travel_time, work_time = calc_hours(began, arrived), calc_hours(arrived, left)
-                processed_data.append({"date": date_num, "site": site, "began": began, "arrived": arrived, "left": left, "work": work_time, "travel": travel_time})
+                
+                # --- APPLY PENDING BREAK TO THIS JOB ---
+                rest_break_display = ""
+                if pending_break_mins > 0:
+                    rest_break_display = str(pending_break_mins)
+                    # Deduct the break time from the calculated travel time block
+                    travel_time = max(0.0, travel_time - (pending_break_mins / 60.0))
+                    pending_break_mins = 0 # Reset for the next jobs
+                
+                processed_data.append({
+                    "date": date_num, 
+                    "site": site, 
+                    "began": began, 
+                    "arrived": arrived, 
+                    "left": left, 
+                    "work": work_time, 
+                    "travel": travel_time,
+                    "rest_break": rest_break_display
+                })
                 
             html_content = f"""
             <!DOCTYPE html>
@@ -131,7 +172,7 @@ if uploaded_file is not None:
             </head>
             <body>
                 <div class="header">
-                    <div class="header-left"><strong>Engineer:</strong> MARK GREEN (MGR)<br><strong>Network (Catering Engineers) Ltd</strong></div>
+                    <div class="header-left"><strong>Engineer:</strong> {final_engineer}<br><strong>Network (Catering Engineers) Ltd</strong></div>
                     <div class="header-center"><strong>Week End Date:</strong> {final_date}<br><strong>Week:</strong> {final_week}</div>
                     <div class="header-right"><strong>On-call:</strong> {on_call_status}</div>
                 </div>
@@ -144,7 +185,6 @@ if uploaded_file is not None:
             grand_total = 0
             
             for date, group in df_processed.groupby("date", sort=False):
-                # Calculate beautifully formatted UK Dates (e.g. Monday 20th April)
                 try:
                     end_date_obj = datetime.strptime(final_date, "%d %b %Y")
                     day_str = f"Date: {date}"
@@ -162,11 +202,12 @@ if uploaded_file is not None:
                 day_total = 0
                 for _, row in group.iterrows():
                     row_total = row['work'] + row['travel']
-                    html_content += f"<tr><td>{row['site']}</td><td></td><td></td><td>{row['began']}</td><td>{row['arrived']}</td><td>{row['left']}</td><td>{row['work']:.2f}</td><td></td><td>{row['travel']:.2f}</td><td>{row_total:.2f}</td></tr>"
+                    # Inject the Rest Break and the Row Total into the correct HTML columns
+                    html_content += f"<tr><td>{row['site']}</td><td></td><td></td><td>{row['began']}</td><td>{row['arrived']}</td><td>{row['left']}</td><td>{row['work']:.2f}</td><td>{row['rest_break']}</td><td>{row['travel']:.2f}</td><td>{row_total:.2f}</td></tr>"
                     day_total += row_total
                 grand_total += day_total
             
             html_content += f"</tbody></table><div style='margin-top: 20px; font-weight: bold; text-align: right; border-top: 1px solid #000; padding-top: 5px;'>Weekly Total Hours: {grand_total:.2f}</div></body></html>"
             
             st.success("PDF Generated Successfully!")
-            st.download_button(label="Download Timesheet PDF", data=HTML(string=html_content).write_pdf(), file_name=f"MGR_Timesheet_Week_{final_week}.pdf", mime="application/pdf")
+            st.download_button(label="Download Timesheet PDF", data=HTML(string=html_content).write_pdf(), file_name=f"{final_engineer.replace(' ', '_')}_Timesheet_Week_{final_week}.pdf", mime="application/pdf")
