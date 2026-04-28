@@ -2,3 +2,4 @@ streamlit
 pandas
 weasyprint
 pdfplumber
+plotly
