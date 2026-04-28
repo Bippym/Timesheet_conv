@@ -218,13 +218,11 @@ if uploaded_files:
                             if eng_str: st.session_state.saved_engineer = eng_str
 
                     for line in text.split('\n'):
-                        # FORGIVING TIME FINDER (Allows dots/semicolons)
-                        raw_times = re.findall(r'[0-9Oo]{1,2}[:.;][0-9Oo]{2}', line)
+                        # THE FIX: Strictly look for colons to ignore decimal hour columns
+                        raw_times = re.findall(r'[0-9Oo]{1,2}:[0-9Oo]{2}', line)
                         if len(raw_times) >= 1: 
                             first_time_idx = line.find(raw_times[0])
                             raw_site = line[:first_time_idx].strip()
-                            
-                            # MULTI-LETTER DATE MATCHER (Catches "SUN")
                             date_match = re.search(r"^([A-Za-z]{1,3}\s*)?(\d{1,2})\s+", raw_site)
                             date_num = date_match.group(2) if date_match else ""
                             
@@ -238,7 +236,7 @@ if uploaded_files:
                             
                             times = []
                             for t in raw_times:
-                                t_clean = t.replace('O', '0').replace('o', '0').replace('.', ':').replace(';', ':')
+                                t_clean = t.replace('O', '0').replace('o', '0')
                                 hr, mn = t_clean.split(':')
                                 if hr.isdigit() and int(hr) > 23: hr = hr[0]
                                 times.append(f"{hr}:{mn}")
@@ -333,6 +331,7 @@ if uploaded_files:
             row["Month"] = d_packet["month_label"]
             row["File"] = file_name
             master_analytics_data.append(row)
+
 
     # --- TABBED INTERFACE ---
     tab1, tab2 = st.tabs(["📑 Individual Editor & Batch Export", "📈 Master Analytics & Pay"])
@@ -487,6 +486,7 @@ if uploaded_files:
             st.markdown("---")
             st.markdown("### 💰 Master Pay Calculator")
             p1, p2 = st.columns(2)
+            def update_rate(): st.session_state.saved_rate = st.session_state.rate_input
             with p1: rate = st.number_input("Global Hourly Rate (£)", value=st.session_state.saved_rate, step=0.50, format="%.2f", key="global_rate_input", on_change=update_rate)
             
             all_dt_strs = df_filtered["Week End"].unique()
