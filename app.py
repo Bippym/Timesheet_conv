@@ -21,7 +21,13 @@ def calc_hours(start_str, end_str):
         if len(start_str.split(":")[0]) == 1: start_str = "0" + start_str
         if len(end_str.split(":")[0]) == 1: end_str = "0" + end_str
         tdelta = datetime.strptime(end_str, fmt) - datetime.strptime(start_str, fmt)
-        if tdelta.days < 0: tdelta = timedelta(days=0, seconds=tdelta.seconds, microseconds=tdelta.microseconds)
+        
+        if tdelta.days < 0:
+            hrs = (timedelta(days=1) + tdelta).total_seconds() / 3600
+            if hrs > 10: 
+                return round(hrs - 14, 2) 
+            return round(hrs, 2)
+            
         return round(tdelta.total_seconds() / 3600, 2)
     except: return 0.0
 
@@ -40,7 +46,6 @@ if uploaded_file is not None:
                 text = page.extract_text()
                 if text: raw_text_dump += text + "\n\n---PAGE BREAK---\n\n"
                 
-                # Extract Header Info
                 if "Week Ending:" in text:
                     match = re.search(r"Week Ending:\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})", text)
                     if match: week_ending_str = match.group(1)
@@ -55,8 +60,6 @@ if uploaded_file is not None:
                         if eng_str: engineer_name = eng_str
 
                 for line in text.split('\n'):
-                    # --- NEW OCR TIME HUNTER ---
-                    # Finds standard times AND corrupted times (e.g., 60:28 or 6O:02)
                     raw_times = re.findall(r'[0-9Oo]{1,2}:[0-9Oo]{2}', line)
                     
                     if len(raw_times) >= 1: 
@@ -66,24 +69,24 @@ if uploaded_file is not None:
                         date_match = re.search(r"^([A-Z]\s*)?(\d{1,2})\s+", raw_site)
                         date_num = date_match.group(2) if date_match else ""
                         
-                        site_clean = raw_site.split("**QUO")[0].strip()
+                        site_clean = re.split(r"\*+QUO|\*?QUOTE", raw_site, flags=re.IGNORECASE)[0].strip()
+                        site_clean = re.split(r"£|R1 OA|\b[A-Z0-9]{3,}:", site_clean)[0].strip()
                         site_clean = re.sub(r"^([A-Z]\s*)?\d{1,2}\s+", "", site_clean) 
                         site_clean = re.sub(r"\s+\d+$", "", site_clean).strip() 
+                        site_clean = re.sub(r"\s+\d+\.\d+$", "", site_clean).strip() 
+                        site_clean = re.sub(r"\s+[A-Z0-9\s]{1,10}SC$", "", site_clean).strip() 
                         
-                        # --- CLEAN BYBOX GARBAGE ---
-                        site_clean = re.sub(r"\s+\d+\.\d+$", "", site_clean).strip() # Removes trailing decimals like 0.93
-                        site_clean = re.sub(r"\s+[A-Z0-9\s]{1,10}SC$", "", site_clean).strip() # Removes garbage like 1T4E SC
+                        # --- LOWERCASE NOTE ERADICATOR ---
+                        # Instantly deletes typed notes appended to the end of site names
+                        site_clean = re.sub(r"\s+[a-z].*", "", site_clean).strip()
                         
-                        # --- OCR TIME AUTO-CORRECTOR ---
                         times = []
                         for t in raw_times:
-                            t_clean = t.replace('O', '0').replace('o', '0') # Fixes O to 0
+                            t_clean = t.replace('O', '0').replace('o', '0')
                             hr, mn = t_clean.split(':')
-                            if hr.isdigit() and int(hr) > 23:
-                                hr = hr[0] # Fixes 60:28 back to 6:28
+                            if hr.isdigit() and int(hr) > 23: hr = hr[0]
                             times.append(f"{hr}:{mn}")
                         
-                        # Smart Assignment
                         if len(times) >= 3:
                             began, arrived, left = times[0], times[1], times[2]
                         elif len(times) == 2:
@@ -108,7 +111,7 @@ if uploaded_file is not None:
         st.text_area("Raw Extracted Text", raw_text_dump, height=300)
 
     if extracted_data:
-        st.success("Data extracted! The OCR Time Corrector is active.")
+        st.success("Data extracted! The OCR Time Corrector and Continuity Auto-Snap are active.")
         
         col1, col2, col3 = st.columns(3)
         with col1: final_date = st.text_input("Week End Date", value=week_ending_str)
@@ -130,9 +133,8 @@ if uploaded_file is not None:
             on_call_status = "Yes" if has_weekend else "No"
             
             for index, row in edited_df.iterrows():
-                date_num, site, arrived, left, began, raw_info = str(row["Date Num"]), str(row["Site & Ref No."]), str(row["Arrived On Site"]), str(row["Left Site"]), str(row["Began Journey"]), str(row["Original Row Info"])
+                date_num, site, arrived, left, began = str(row["Date Num"]), str(row["Site & Ref No."]), str(row["Arrived On Site"]), str(row["Left Site"]), str(row["Began Journey"])
                 
-                # --- BREAK HANDLER ---
                 if "BREAK" in site.upper():
                     b_mins = round(calc_hours(arrived, left) * 60)
                     if b_mins == 0: b_mins = round(calc_hours(began, left) * 60) 
@@ -141,13 +143,20 @@ if uploaded_file is not None:
                     pending_break_mins += b_mins
                     continue 
 
-                # --- CONTINUITY RULE ---
+                # --- STRICT CONTINUITY AUTO-SNAP ---
+                if len(processed_data) > 0:
+                    prev_left = processed_data[-1]["left"]
+                    prev_date = processed_data[-1]["date"]
+                    
+                    # Overwrite start time to match previous end time if on the same day and no break occurred
+                    if date_num == prev_date and prev_left != "" and pending_break_mins == 0:
+                        began = prev_left
+
                 if (began == "" or pending_break_mins > 0) and len(processed_data) > 0: 
                     began = processed_data[-1]["left"]
                     
                 travel_time, work_time = calc_hours(began, arrived), calc_hours(arrived, left)
                 
-                # --- APPLY PENDING BREAK ---
                 rest_break_display = ""
                 if pending_break_mins > 0:
                     rest_break_display = str(pending_break_mins)
