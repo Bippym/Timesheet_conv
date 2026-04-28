@@ -7,6 +7,11 @@ import re
 
 st.set_page_config(page_title="Network Timesheet Generator", layout="wide")
 
+# --- SESSION STATE CACHING (Remember Me) ---
+if "saved_contract" not in st.session_state: st.session_state.saved_contract = 40
+if "saved_rate" not in st.session_state: st.session_state.saved_rate = 0.00
+if "saved_engineer" not in st.session_state: st.session_state.saved_engineer = "UNKNOWN ENGINEER"
+
 st.title("Network (Catering Engineers) Ltd - Timesheet Converter")
 st.markdown("Upload your work-style PDF. The app will extract the data, apply your continuity rules, and generate the manual-style PDF.")
 
@@ -121,7 +126,7 @@ uploaded_file = st.file_uploader("Upload Work-Style Timesheet (PDF)", type=["pdf
 
 if uploaded_file is not None:
     extracted_data = []
-    week_ending_str, week_number, engineer_name = "", "18", "UNKNOWN ENGINEER"
+    week_ending_str, week_number = "", "18"
     raw_text_dump = ""
     
     with st.spinner("Extracting data from PDF..."):
@@ -141,7 +146,7 @@ if uploaded_file is not None:
                     if match:
                         eng_str = match.group(1).strip()
                         eng_str = re.split(r"(Week|Date|Network)", eng_str)[0].strip()
-                        if eng_str: engineer_name = eng_str
+                        if eng_str: st.session_state.saved_engineer = eng_str
 
                 for line in text.split('\n'):
                     raw_times = re.findall(r'[0-9Oo]{1,2}:[0-9Oo]{2}', line)
@@ -186,8 +191,13 @@ if uploaded_file is not None:
         c1, c2, c3, c4 = st.columns(4)
         with c1: final_date = st.text_input("Week End Date", value=week_ending_str)
         with c2: final_week = st.text_input("Week Number", value=week_number)
-        with c3: final_engineer = st.text_input("Engineer Name", value=engineer_name)
-        with c4: contract_hours = st.selectbox("Contracted Hours", options=[40, 45], index=0)
+        
+        # Inputs tied to Session State
+        def update_eng(): st.session_state.saved_engineer = st.session_state.eng_input
+        def update_con(): st.session_state.saved_contract = st.session_state.con_input
+        
+        with c3: final_engineer = st.text_input("Engineer Name", value=st.session_state.saved_engineer, key="eng_input", on_change=update_eng)
+        with c4: contract_hours = st.selectbox("Contracted Hours", options=[40, 45], index=0 if st.session_state.saved_contract == 40 else 1, key="con_input", on_change=update_con)
             
         df = pd.DataFrame(extracted_data)
         df = df[["Date Num", "Site & Ref No.", "Began Journey", "Arrived On Site", "Left Site", "Original Row Info"]]
@@ -217,11 +227,25 @@ if uploaded_file is not None:
                 with cols[idx]:
                     missing_selections[d_num] = st.selectbox(f"{d_name} ({d_num})", ["Ignore", "Sick", "Annual Leave", "Unpaid Leave"], key=f"miss_{d_num}")
 
+        # --- PRE-PROCESS DATA FOR CHARTS AND PAY ---
+        proc_data = process_timesheet_data(edited_df, end_date_obj, missing_weekdays, missing_selections, contract_hours)
+        df_proc = pd.DataFrame(proc_data)
+
+        # --- VISUAL ANALYTICS ---
+        st.markdown("### 📊 Weekly Breakdown: Work vs. Travel")
+        try:
+            chart_data = df_proc.groupby("date")[["work", "travel"]].sum()
+            st.bar_chart(chart_data, height=300)
+        except: pass
+
         # --- NEW PAY CALCULATOR (INFO ONLY) ---
         with st.expander("💰 Expected Pay Calculator (Info Only)", expanded=False):
             st.info("This section is for your reference only and will NOT appear on the generated PDF.")
+            
+            def update_rate(): st.session_state.saved_rate = st.session_state.rate_input
+            
             p1, p2 = st.columns(2)
-            with p1: rate = st.number_input("Hourly Rate (£)", value=21.00, step=0.50, format="%.2f")
+            with p1: rate = st.number_input("Hourly Rate (£)", value=st.session_state.saved_rate, step=0.50, format="%.2f", key="rate_input", on_change=update_rate)
             
             if end_date_obj:
                 all_dates = [(str((end_date_obj - timedelta(days=6-i)).day), (end_date_obj - timedelta(days=6-i)).strftime("%A")) for i in range(7)]
@@ -232,9 +256,6 @@ if uploaded_file is not None:
                 bank_holidays = []
 
             if st.button("Calculate Expected Pay"):
-                proc_data = process_timesheet_data(edited_df, end_date_obj, missing_weekdays, missing_selections, contract_hours)
-                df_proc = pd.DataFrame(proc_data)
-
                 double_time_hours = 0.0
                 standard_time_hours = 0.0
 
@@ -269,13 +290,12 @@ if uploaded_file is not None:
                 st.success(f"### Estimated Gross Pay: £{total_pay:.2f}")
 
         # --- GENERATE PDF ROUTINE ---
+        st.markdown("---")
         if st.button("Apply Rules & Generate PDF", type="primary"):
             has_weekend = False
             for raw_info in edited_df["Original Row Info"].astype(str):
                 if re.match(r"^[S]\s*\d{1,2}", raw_info): has_weekend = True
             on_call_status = "Yes" if has_weekend else "No"
-            
-            processed_data = process_timesheet_data(edited_df, end_date_obj, missing_weekdays, missing_selections, contract_hours)
                 
             html_content = f"""
             <!DOCTYPE html>
@@ -305,10 +325,9 @@ if uploaded_file is not None:
                     <tbody>
             """
             
-            df_processed = pd.DataFrame(processed_data)
             grand_total = 0
             
-            for date, group in df_processed.groupby("date", sort=False):
+            for date, group in df_proc.groupby("date", sort=False):
                 try:
                     end_date_obj_html = datetime.strptime(final_date, "%d %b %Y")
                     day_str = f"Date: {date}"
