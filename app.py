@@ -18,7 +18,6 @@ if "saved_service_5yr" not in st.session_state: st.session_state.saved_service_5
 if "resolutions" not in st.session_state: st.session_state.resolutions = {}
 if "selected_file_index" not in st.session_state: st.session_state.selected_file_index = 0
 
-# Standard columns to prevent KeyError
 TS_COLS = ["Date Num", "Site & Ref No.", "Began Journey", "Arrived On Site", "Left Site"]
 
 # --- UTILITIES ---
@@ -44,26 +43,80 @@ def calc_hours(start_str, end_str):
 
 def generate_pdf_html(df_processed, engineer, week_end_date, week_number, on_call):
     html_content = f"""
-    <!DOCTYPE html><html><head><style>
-        body {{ font-family: Arial, sans-serif; font-size: 8pt; margin: 0; padding: 20px; }}
-        .header {{ display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 15px; border-bottom: 1.5px solid #000; padding-bottom: 10px; }}
-        table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
-        th, td {{ border: 1px solid #000; padding: 4px; text-align: center; }}
-        th {{ background-color: #f2f2f2; font-size: 7pt; }}
-    </style></head><body>
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <style>
+        body {{ font-family: Arial, sans-serif; font-size: 9pt; margin: 0; padding: 20px; color: #000; }}
+        .header {{ display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 20px; border-bottom: 1.5px solid #000; padding-bottom: 10px; }}
+        .header-section {{ flex: 1; }}
+        .header-center {{ text-align: center; }}
+        .header-right {{ text-align: right; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; }}
+        th, td {{ border: 1px solid #000; padding: 6px; text-align: center; vertical-align: middle; word-wrap: break-word; }}
+        th {{ background-color: #f2f2f2; font-weight: bold; text-transform: uppercase; font-size: 8pt; }}
+        .site-col {{ text-align: left; width: 35%; font-weight: bold; }}
+        .total-row {{ background-color: #eef2f5; font-weight: bold; }}
+    </style>
+    </head>
+    <body>
         <div class="header">
-            <div><strong>Engineer:</strong> {engineer}<br>Network (Catering Engineers) Ltd</div>
-            <div style="text-align:center;"><strong>Week End:</strong> {week_end_date}<br><strong>Week:</strong> {week_number}</div>
-            <div style="text-align:right;"><strong>On-call:</strong> {on_call}</div>
+            <div class="header-section">
+                <strong>Engineer:</strong> {engineer}<br>
+                <strong>Network (Catering Engineers) Ltd</strong>
+            </div>
+            <div class="header-section header-center">
+                <strong>Week End:</strong> {week_end_date}<br>
+                <strong>Week:</strong> {week_number}
+            </div>
+            <div class="header-section header-right">
+                <strong>On-call:</strong> {on_call}
+            </div>
         </div>
         <table>
-            <thead><tr><th>Site</th><th>Began</th><th>Arrived</th><th>Left</th><th>Work</th><th>Travel</th><th>Total</th></tr></thead>
+            <thead>
+                <tr>
+                    <th class="site-col">Site</th>
+                    <th style="width: 10%;">Began</th>
+                    <th style="width: 10%;">Arrived</th>
+                    <th style="width: 10%;">Left</th>
+                    <th style="width: 10%;">Work</th>
+                    <th style="width: 10%;">Travel</th>
+                    <th style="width: 15%;">Total</th>
+                </tr>
+            </thead>
             <tbody>
     """
+    grand_total = 0
     for row in df_processed:
-        tot = row.get('work', 0) + row.get('travel', 0)
-        html_content += f"<tr><td>{row.get('site','')}</td><td>{row.get('began','')}</td><td>{row.get('arrived','')}</td><td>{row.get('left','')}</td><td>{row.get('work',0):.2f}</td><td>{row.get('travel',0):.2f}</td><td>{tot:.2f}</td></tr>"
-    html_content += "</tbody></table></body></html>"
+        site = str(row.get('site','')).upper()
+        work = row.get('work', 0)
+        travel = row.get('travel', 0)
+        row_total = work + travel
+        grand_total += row_total
+        
+        html_content += f"""
+                <tr>
+                    <td class="site-col">{site}</td>
+                    <td>{row.get('began','')}</td>
+                    <td>{row.get('arrived','')}</td>
+                    <td>{row.get('left','')}</td>
+                    <td>{work:.2f}</td>
+                    <td>{travel:.2f}</td>
+                    <td>{row_total:.2f}</td>
+                </tr>
+        """
+    
+    html_content += f"""
+                <tr class="total-row">
+                    <td colspan="6" style="text-align: right;">WEEKLY TOTAL HOURS:</td>
+                    <td>{grand_total:.2f}</td>
+                </tr>
+            </tbody>
+        </table>
+    </body>
+    </html>
+    """
     return html_content
 
 def process_timesheet_data(df, end_date_obj=None, missing_selections=None, contract_hours=40):
@@ -93,7 +146,7 @@ def process_timesheet_data(df, end_date_obj=None, missing_selections=None, contr
                     if str(curr.day) == str(d_num):
                         f_date = curr.strftime("%Y-%m-%d")
                         break
-            processed_data.append({"date": d_num, "full_date": f_date, "site": reason.upper(), "work": daily if reason == "Annual Leave" else 0.0, "travel": 0.0})
+            processed_data.append({"date": d_num, "full_date": f_date, "site": reason.upper(), "began": "", "arrived": "", "left": "", "work": daily if reason == "Annual Leave" else 0.0, "travel": 0.0})
     return processed_data
 
 # --- APP FLOW ---
@@ -160,10 +213,8 @@ if uploaded_pdfs:
         try: dt_obj = datetime.strptime(we, "%d %b %Y")
         except: pass
         
-        # Ensure correct column headers even for blank files
         df_file = pd.DataFrame(rows)
-        if df_file.empty:
-            df_file = pd.DataFrame(columns=TS_COLS)
+        if df_file.empty: df_file = pd.DataFrame(columns=TS_COLS)
 
         if dt_obj:
             expected = [str((dt_obj - timedelta(days=6-i)).day) for i in range(7) if (dt_obj - timedelta(days=6-i)).weekday() < 5]
@@ -176,7 +227,7 @@ if uploaded_pdfs:
 
 # --- GLOBAL ALERT ---
 if global_missing_files:
-    st.error("🚨 **Action Required!** Missing days in some files. Click to resolve:")
+    st.error("🚨 **Action Required!** Click to resolve missing days:")
     cols = st.columns(len(global_missing_files))
     for i, file_info in enumerate(global_missing_files):
         if cols[i].button(f"🛠️ Fix {file_info['name']}", key=f"jump_{file_info['name']}"):
@@ -226,12 +277,17 @@ with t1:
                     st.success("Resolved!")
                     st.rerun()
 
-        st.data_editor(up["df"], num_rows="dynamic", use_container_width=True, key=f"ed_{sel_name}")
+        edited_df = st.data_editor(up["df"], num_rows="dynamic", use_container_width=True, key=f"ed_{sel_name}")
         
         if st.button("🖨️ Generate & Download Resolved PDF"):
             res = st.session_state.resolutions.get(sel_name, {})
-            proc = process_timesheet_data(up["df"], end_dt, res, st.session_state.saved_contract)
-            html = generate_pdf_html(proc, st.session_state.saved_engineer, f_we, f_wk, "Yes")
+            proc = process_timesheet_data(edited_df, end_dt, res, st.session_state.saved_contract)
+            
+            # Weekend detection for on-call
+            has_weekend = any(re.search(r'^(SAT|SUN|S\s|SA\s|SU\s)', str(row.get('Original Row Info','')).upper()) for _, row in edited_df.iterrows())
+            on_call_val = "Yes" if has_weekend else "No"
+            
+            html = generate_pdf_html(proc, st.session_state.saved_engineer, f_we, f_wk, on_call_val)
             st.download_button("⬇️ Download PDF", HTML(string=html).write_pdf(), file_name=f"{sel_name}.pdf")
 
 with t2:
