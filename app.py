@@ -20,7 +20,7 @@ with st.sidebar:
     debug_mode = st.checkbox("Enable Developer Debug Mode")
 
 st.title("Network (Catering Engineers) Ltd - Timesheet Portal")
-st.markdown("Upload multiple timesheets to process PDFs, export batches, or view combined analytics.")
+st.markdown("Upload multiple timesheets to process PDFs, resolve missing days, and view combined analytics.")
 
 # --- CORE FUNCTIONS ---
 def fix_time_string(current_time, previous_time):
@@ -175,10 +175,18 @@ def generate_pdf_html(df_processed, engineer, week_end_date, week_number, on_cal
     html_content += f"</tbody></table><div style='margin-top: 20px; font-weight: bold; text-align: right; border-top: 1px solid #000; padding-top: 5px;'>Weekly Total Hours: {grand_total:.2f}</div></body></html>"
     return html_content
 
-# --- EXTRACTION ROUTINE ---
+
+# --- MULTI-FILE EXTRACTION ROUTINE ---
 uploaded_files = st.file_uploader("Upload Work-Style Timesheets (PDF)", type=["pdf"], accept_multiple_files=True)
 
 if uploaded_files:
+    # 1. Global User Settings
+    c1, c2 = st.columns(2)
+    def update_eng(): st.session_state.saved_engineer = st.session_state.eng_input
+    def update_con(): st.session_state.saved_contract = st.session_state.con_input
+    with c1: final_engineer = st.text_input("Engineer Name (Global)", value=st.session_state.saved_engineer, key="eng_input", on_change=update_eng)
+    with c2: contract_hours = st.selectbox("Contracted Hours", options=[40, 45], index=0 if st.session_state.saved_contract == 40 else 1, key="con_input", on_change=update_con)
+    
     datasets = {}
     master_analytics_data = []
     
@@ -199,7 +207,7 @@ if uploaded_files:
                     if "Week:" in text:
                         match = re.search(r"Week:\s*(\d+)", text)
                         if match: week_number = match.group(1)
-                    if "Engineer:" in text:
+                    if "Engineer:" in text and st.session_state.saved_engineer == "UNKNOWN ENGINEER":
                         match = re.search(r"Engineer:\s*([A-Za-z\s]+)", text)
                         if match:
                             eng_str = match.group(1).strip()
@@ -250,123 +258,109 @@ if uploaded_files:
                 "month_label": month_label,
                 "dt_obj": dt_obj,
                 "df": pd.DataFrame(extracted_data),
-                "raw_text": raw_text_dump
+                "raw_text": raw_text_dump,
+                "missing_selections": {}
             }
+
+    # 2. Global Missing Days Resolution
+    st.markdown("---")
+    st.markdown("### ⚠️ Global Missing Days Resolution")
+    any_missing = False
+    
+    for file_name, d_packet in datasets.items():
+        if d_packet["dt_obj"]:
+            expected_weekdays = []
+            for i in range(7): 
+                curr = d_packet["dt_obj"] - timedelta(days=6-i)
+                if curr.weekday() < 5: expected_weekdays.append((str(curr.day), curr.strftime("%A")))
             
-            # Auto-process for the Analytics master set (ignoring missing days for analytics default)
-            temp_processed = process_timesheet_data(pd.DataFrame(extracted_data), dt_obj, None, None, st.session_state.saved_contract)
-            for row in temp_processed:
-                row["Week End"] = week_ending_str
-                row["Month"] = month_label
-                row["File"] = uploaded_file.name
-                master_analytics_data.append(row)
+            extracted_dates = d_packet["df"]["Date Num"].replace("", pd.NA).dropna().unique().tolist()
+            missing_weekdays = [d for d in expected_weekdays if d[0] not in extracted_dates]
+            
+            if missing_weekdays:
+                any_missing = True
+                st.warning(f"Missing days detected in: **{file_name}** (Week Ending: {d_packet['week_ending']})")
+                cols = st.columns(len(missing_weekdays))
+                for idx, (d_num, d_name) in enumerate(missing_weekdays):
+                    with cols[idx]: 
+                        datasets[file_name]["missing_selections"][d_num] = st.selectbox(f"{d_name} ({d_num})", ["Ignore", "Sick", "Annual Leave", "Unpaid Leave"], key=f"global_miss_{file_name}_{d_num}")
+                
+    if not any_missing:
+        st.success("No missing weekdays detected across all uploaded files.")
+
+    # 3. Compile Master Analytics Data
+    for file_name, d_packet in datasets.items():
+        missing_weekdays_info = []
+        if d_packet["dt_obj"]:
+            expected_weekdays = []
+            for i in range(7): 
+                curr = d_packet["dt_obj"] - timedelta(days=6-i)
+                if curr.weekday() < 5: expected_weekdays.append((str(curr.day), curr.strftime("%A")))
+            extracted_dates = d_packet["df"]["Date Num"].replace("", pd.NA).dropna().unique().tolist()
+            missing_weekdays_info = [d for d in expected_weekdays if d[0] not in extracted_dates]
+            
+        temp_processed = process_timesheet_data(d_packet["df"], d_packet["dt_obj"], missing_weekdays_info, d_packet["missing_selections"], contract_hours)
+        
+        for row in temp_processed:
+            row["Week End"] = d_packet["week_ending"]
+            row["Month"] = d_packet["month_label"]
+            row["File"] = file_name
+            master_analytics_data.append(row)
+
 
     # --- TABBED INTERFACE ---
     tab1, tab2 = st.tabs(["📑 Individual Editor & Batch Export", "📈 Master Analytics & Pay"])
 
     # --- TAB 1: GENERATION ---
     with tab1:
-        st.markdown("### 1️⃣ Single Timesheet Editor")
-        selected_file = st.selectbox("Select timesheet to edit & export:", list(datasets.keys()))
+        st.markdown("### 1️⃣ Single Timesheet Preview")
+        selected_file = st.selectbox("Select timesheet to preview:", list(datasets.keys()))
         data_packet = datasets[selected_file]
         
-        c1, c2, c3, c4 = st.columns(4)
-        with c1: final_date = st.text_input("Week End Date", value=data_packet["week_ending"])
-        with c2: final_week = st.text_input("Week Number", value=data_packet["week_number"])
-        
-        def update_eng(): st.session_state.saved_engineer = st.session_state.eng_input
-        def update_con(): st.session_state.saved_contract = st.session_state.con_input
-        
-        with c3: final_engineer = st.text_input("Engineer Name", value=st.session_state.saved_engineer, key="eng_input", on_change=update_eng)
-        with c4: contract_hours = st.selectbox("Contracted Hours", options=[40, 45], index=0 if st.session_state.saved_contract == 40 else 1, key="con_input", on_change=update_con)
-            
         df_edit = data_packet["df"][["Date Num", "Site & Ref No.", "Began Journey", "Arrived On Site", "Left Site", "Original Row Info"]]
         edited_df = st.data_editor(df_edit, num_rows="dynamic", use_container_width=True)
-        
-        try:
-            end_date_obj = datetime.strptime(final_date, "%d %b %Y")
-            expected_weekdays = []
-            for i in range(7): 
-                curr = end_date_obj - timedelta(days=6-i)
-                if curr.weekday() < 5: expected_weekdays.append((str(curr.day), curr.strftime("%A")))
-        except:
-            end_date_obj = None
-            expected_weekdays = []
 
-        extracted_dates = edited_df["Date Num"].replace("", pd.NA).dropna().unique().tolist()
-        missing_weekdays = [d for d in expected_weekdays if d[0] not in extracted_dates]
-        
-        missing_selections = {}
-        if missing_weekdays:
-            st.warning("⚠️ Missing Weekdays Detected!")
-            cols = st.columns(len(missing_weekdays))
-            for idx, (d_num, d_name) in enumerate(missing_weekdays):
-                with cols[idx]: missing_selections[d_num] = st.selectbox(f"{d_name} ({d_num})", ["Ignore", "Sick", "Annual Leave", "Unpaid Leave"], key=f"miss_{d_num}")
-
-        # --- LIVE PAY CALCULATOR (Single Timesheet) ---
-        with st.expander("💰 Expected Pay Calculator (Live)", expanded=False):
-            def update_rate(): st.session_state.saved_rate = st.session_state.rate_input
+        if st.button(f"Generate PDF for {selected_file}", type="primary"):
+            missing_weekdays_info = []
+            if data_packet["dt_obj"]:
+                expected_weekdays = []
+                for i in range(7): 
+                    curr = data_packet["dt_obj"] - timedelta(days=6-i)
+                    if curr.weekday() < 5: expected_weekdays.append((str(curr.day), curr.strftime("%A")))
+                extracted_dates = edited_df["Date Num"].replace("", pd.NA).dropna().unique().tolist()
+                missing_weekdays_info = [d for d in expected_weekdays if d[0] not in extracted_dates]
+                
+            processed_data = process_timesheet_data(edited_df, data_packet["dt_obj"], missing_weekdays_info, data_packet["missing_selections"], contract_hours)
             
-            p1, p2 = st.columns(2)
-            with p1: rate = st.number_input("Hourly Rate (£)", value=st.session_state.saved_rate, step=0.50, format="%.2f", key="rate_input", on_change=update_rate)
-            
-            if end_date_obj:
-                all_dates = [(str((end_date_obj - timedelta(days=6-i)).day), (end_date_obj - timedelta(days=6-i)).strftime("%A")) for i in range(7)]
-                bh_options = [f"{d[1]} {d[0]}" for d in all_dates]
-                bank_holidays_raw = st.multiselect("Select Bank Holidays (Pays 2x):", options=bh_options)
-                bank_holidays = [b.split(" ")[1] for b in bank_holidays_raw]
-            else: bank_holidays = []
-
-            proc_data = process_timesheet_data(edited_df, end_date_obj, missing_weekdays, missing_selections, contract_hours)
-            df_proc = pd.DataFrame(proc_data)
-
-            double_time_hours, standard_time_hours = 0.0, 0.0
-            for date, group in df_proc.groupby("date", sort=False):
-                day_total = group['work'].sum() + group['travel'].sum()
-                is_double_time = False
-                if str(date) in bank_holidays: is_double_time = True
-                elif end_date_obj:
-                    for i in range(7):
-                        curr = end_date_obj - timedelta(days=6-i)
-                        if str(curr.day) == str(date) and curr.weekday() == 6:
-                            is_double_time = True
-                            break
-                if is_double_time: double_time_hours += day_total
-                else: standard_time_hours += day_total
-
-            base_hrs = min(standard_time_hours, contract_hours)
-            overtime_hrs = max(0, standard_time_hours - contract_hours)
-            base_pay, overtime_pay, double_pay = base_hrs * rate, overtime_hrs * (rate * 1.5), double_time_hours * (rate * 2.0)
-            total_pay = base_pay + overtime_pay + double_pay
-
-            st.markdown("---")
-            st.markdown(f"**Standard Hours ({base_hrs:.2f} hrs at £{rate:.2f}/hr):** £{base_pay:.2f}")
-            if overtime_hrs > 0: st.markdown(f"**Overtime 1.5x ({overtime_hrs:.2f} hrs at £{rate*1.5:.2f}/hr):** £{overtime_pay:.2f}")
-            if double_time_hours > 0: st.markdown(f"**Sunday/Bank Hol 2x ({double_time_hours:.2f} hrs at £{rate*2.0:.2f}/hr):** £{double_pay:.2f}")
-            st.success(f"### Estimated Gross Pay: £{total_pay:.2f}")
-
-        # Generate Individual PDF
-        has_weekend = any(re.match(r"^[S]\s*\d{1,2}", str(info)) for info in edited_df["Original Row Info"])
-        on_call_status = "Yes" if has_weekend else "No"
-        html_content = generate_pdf_html(proc_data, final_engineer, final_date, final_week, on_call_status)
-        
-        st.download_button(label=f"⬇️ Download PDF for {selected_file}", data=HTML(string=html_content).write_pdf(), file_name=f"{final_engineer.replace(' ', '_')}_{final_week}.pdf", mime="application/pdf", type="primary")
+            has_weekend = any(re.match(r"^[S]\s*\d{1,2}", str(info)) for info in edited_df["Original Row Info"])
+            on_call_status = "Yes" if has_weekend else "No"
+            html_content = generate_pdf_html(processed_data, final_engineer, data_packet["week_ending"], data_packet["week_number"], on_call_status)
+            st.download_button(label=f"⬇️ Download PDF for {selected_file}", data=HTML(string=html_content).write_pdf(), file_name=f"{final_engineer.replace(' ', '_')}_{data_packet['week_number']}.pdf", mime="application/pdf")
 
         # --- BATCH EXPORT ---
         if len(datasets) > 1:
             st.markdown("---")
             st.markdown("### 2️⃣ Batch Operations")
-            st.info("Generates all uploaded timesheets simultaneously using automatic extraction rules.")
+            st.info("Generates all uploaded timesheets simultaneously using the missing days resolutions defined above.")
             
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                for file_name, d_packet in datasets.items():
-                    batch_proc_data = process_timesheet_data(d_packet["df"], d_packet["dt_obj"], None, None, contract_hours)
-                    has_wknd = any(re.match(r"^[S]\s*\d{1,2}", str(info)) for info in d_packet["df"]["Original Row Info"])
+                for file_name, d_pack in datasets.items():
+                    missing_weekdays_info = []
+                    if d_pack["dt_obj"]:
+                        expected_weekdays = []
+                        for i in range(7): 
+                            curr = d_pack["dt_obj"] - timedelta(days=6-i)
+                            if curr.weekday() < 5: expected_weekdays.append((str(curr.day), curr.strftime("%A")))
+                        extracted_dates = d_pack["df"]["Date Num"].replace("", pd.NA).dropna().unique().tolist()
+                        missing_weekdays_info = [d for d in expected_weekdays if d[0] not in extracted_dates]
+
+                    batch_proc_data = process_timesheet_data(d_pack["df"], d_pack["dt_obj"], missing_weekdays_info, d_pack["missing_selections"], contract_hours)
+                    has_wknd = any(re.match(r"^[S]\s*\d{1,2}", str(info)) for info in d_pack["df"]["Original Row Info"])
                     oc_status = "Yes" if has_wknd else "No"
-                    b_html = generate_pdf_html(batch_proc_data, final_engineer, d_packet["week_ending"], d_packet["week_number"], oc_status)
+                    b_html = generate_pdf_html(batch_proc_data, final_engineer, d_pack["week_ending"], d_pack["week_number"], oc_status)
                     pdf_bytes = HTML(string=b_html).write_pdf()
-                    zip_file.writestr(f"{final_engineer.replace(' ', '_')}_Wk_{d_packet['week_number']}.pdf", pdf_bytes)
+                    zip_file.writestr(f"{final_engineer.replace(' ', '_')}_Wk_{d_pack['week_number']}.pdf", pdf_bytes)
             
             st.download_button(label="📦 Download ALL Timesheets as ZIP", data=zip_buffer.getvalue(), file_name="Network_Timesheets_Batch.zip", mime="application/zip")
 
@@ -389,10 +383,36 @@ if uploaded_files:
             else:
                 df_filtered = df_master
 
+        # --- AVERAGES & KPIs ---
+        st.markdown("---")
+        st.markdown("### 📈 Averages & Key Metrics")
+        m1, m2, m3, m4 = st.columns(4)
+        
+        total_work_global = df_filtered['work'].sum()
+        total_travel_global = df_filtered['travel'].sum()
+        total_overall_global = total_work_global + total_travel_global
+        
+        unique_weeks = df_filtered['Week End'].nunique()
+        unique_months = df_filtered['Month'].nunique()
+        unique_days = df_filtered.groupby(['Week End', 'date']).ngroups
+        
+        avg_hrs_week = total_overall_global / unique_weeks if unique_weeks > 0 else 0
+        avg_hrs_month = total_overall_global / unique_months if unique_months > 0 else 0
+        avg_travel_day = total_travel_global / unique_days if unique_days > 0 else 0
+        avg_work_day = total_work_global / unique_days if unique_days > 0 else 0
+        
+        m1.metric("Avg Hours per Week", f"{avg_hrs_week:.2f} hrs")
+        m2.metric("Avg Hours per Month", f"{avg_hrs_month:.2f} hrs")
+        m3.metric("Avg Travel per Day", f"{avg_travel_day:.2f} hrs")
+        m4.metric("Avg On-Site per Day", f"{avg_work_day:.2f} hrs")
+
+
         # --- WEEK-ISOLATED PAY CALCULATOR ---
+        st.markdown("---")
         st.markdown("### 💰 Master Pay Calculator")
         p1, p2 = st.columns(2)
-        with p1: rate = st.number_input("Global Hourly Rate (£)", value=st.session_state.saved_rate, step=0.50, format="%.2f", key="global_rate_input", on_change=update_rate)
+        def update_rate(): st.session_state.saved_rate = st.session_state.rate_input
+        with p1: rate = st.number_input("Global Hourly Rate (£)", value=st.session_state.saved_rate, step=0.50, format="%.2f", key="rate_input", on_change=update_rate)
         
         all_dt_strs = df_filtered["Week End"].unique()
         bh_options = []
@@ -415,6 +435,7 @@ if uploaded_files:
             for _, row in week_group.iterrows():
                 day_total = float(row['work']) + float(row['travel'])
                 is_double_time = False
+                
                 if str(row['date']) in bank_holidays: is_double_time = True
                 
                 try:
@@ -443,10 +464,8 @@ if uploaded_files:
         st.markdown("---")
         c1, c2 = st.columns(2)
         with c1:
-            total_work = df_filtered['work'].sum()
-            total_travel = df_filtered['travel'].sum()
-            if total_work + total_travel > 0:
-                pie_overall = pd.DataFrame({"Category": ["On-Site Work", "Travel Time"], "Hours": [total_work, total_travel]})
+            if total_work_global + total_travel_global > 0:
+                pie_overall = pd.DataFrame({"Category": ["On-Site Work", "Travel Time"], "Hours": [total_work_global, total_travel_global]})
                 fig1 = px.pie(pie_overall, values='Hours', names='Category', hole=0.4, title="Overall Time: Work vs Travel", color_discrete_sequence=['#2e7b32', '#1976d2'])
                 fig1.update_traces(textposition='inside', textinfo='percent+label')
                 st.plotly_chart(fig1, use_container_width=True)
@@ -460,7 +479,9 @@ if uploaded_files:
                 fig2.update_traces(textposition='inside', textinfo='percent+label')
                 st.plotly_chart(fig2, use_container_width=True)
 
-    if debug_mode and raw_text_dump:
+    if debug_mode:
         st.markdown("---")
         st.subheader("🛠️ Developer Diagnostic Text")
-        st.text_area("Raw Extraction Output", datasets[selected_file]["raw_text"], height=400)
+        for file_name, d_packet in datasets.items():
+            st.markdown(f"**{file_name}**")
+            st.text_area(f"Raw Output - {file_name}", d_packet["raw_text"], height=200, key=f"raw_{file_name}")
