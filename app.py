@@ -429,7 +429,7 @@ if uploaded_files:
                     fig2.update_traces(textposition='inside', textinfo='percent+label')
                     st.plotly_chart(fig2, use_container_width=True)
 
-    # --- TAB 3: SALARY & ARREARS ---
+ # --- TAB 3: SALARY & ARREARS ---
     with tab3:
         st.markdown("### 💷 Annual Salary & Arrears Breakdown")
         st.info("In the UK, Basic Pay is calculated annually and paid in 12 equal monthly installments. Overtime and Double-Time are calculated per-week, and paid a month in arrears (e.g., March's overtime is paid in April).")
@@ -462,6 +462,12 @@ if uploaded_files:
 
             # PAYROLL LEDGER ENGINE
             payroll_ledger = {}
+            
+            # --- Variables for Annual Extrapolator ---
+            total_base_hrs = 0.0
+            total_ot_hrs = 0.0
+            total_dt_hrs = 0.0
+
             for week_str, week_group in df_master.groupby("Week End"):
                 try:
                     week_dt_obj = datetime.strptime(week_str, "%d %b %Y")
@@ -495,22 +501,26 @@ if uploaded_files:
                     if is_dt: week_dt_hrs += day_total
                     else: week_std_hrs += day_total
 
+                week_base = min(week_std_hrs, contract_hours)
                 week_ot = max(0, week_std_hrs - contract_hours)
+                
+                # --- Track totals for Annual Extrapolator ---
+                total_base_hrs += week_base
+                total_ot_hrs += week_ot
+                total_dt_hrs += week_dt_hrs
 
                 payroll_ledger[worked_month_key]["basic_count"] += 1
                 payroll_ledger[payment_month_key]["ot_hrs"] += week_ot
                 payroll_ledger[payment_month_key]["dt_hrs"] += week_dt_hrs
 
             payroll_data = []
-            total_projected_gross = 0.0
-
+            
             for m_key in sorted(payroll_ledger.keys()):
                 m_data = payroll_ledger[m_key]
                 basic_pay = monthly_basic if m_data["basic_count"] > 0 else 0.0
                 ot_pay = m_data["ot_hrs"] * (rate * 1.5)
                 dt_pay = m_data["dt_hrs"] * (rate * 2.0)
                 gross = basic_pay + ot_pay + dt_pay
-                total_projected_gross += gross
 
                 payroll_data.append({
                     "Payroll Month": m_data["label"],
@@ -524,7 +534,7 @@ if uploaded_files:
 
             st.dataframe(pd.DataFrame(payroll_data), use_container_width=True)
             
-# --- ANNUAL EARNINGS PROJECTION ---
+            # --- ANNUAL EARNINGS PROJECTION ---
             actual_weeks_uploaded = df_master['Week End'].nunique()
             if actual_weeks_uploaded > 0:
                 # Bypass the monthly ledger entirely to prevent month-spillover inflation.
